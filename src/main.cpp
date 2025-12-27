@@ -2,21 +2,6 @@
 #include <Wire.h>
 //Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
-//Loop counter
-int i = 0;
-
-// Declare signed integer values that we will read. 
-int16_t ax, ay, az;
-int16_t temp;
-int16_t gx, gy, gz;
-
-//Declare converted float variables
-float ax_g, ay_g, az_g, a_magm;
-float a_bias_x = 0.0, a_bias_y = 0.0, a_bias_z = 0.0; // per-axis accelerometer bias (initialized to 0.0)
-float temp_c;
-float gx_dps, gy_dps, gz_dps, g_mag;
-float g_bias_x = 0.0, g_bias_y = 0.0, g_bias_z = 0.0; // per-axis gyroscope bias (initialized to 0.0)
-
 //Define GPIO pins
 #define SDA_PIN 18
 #define SCL_PIN 4
@@ -28,10 +13,30 @@ float g_bias_x = 0.0, g_bias_y = 0.0, g_bias_z = 0.0; // per-axis gyroscope bias
 #define ACCEL_CONFIG_REGISTER 0x1C
 #define ACCEL_REGISTER 0x3B //First register in the 14bytes of accelerometer, temperature and gyro values that appear sequentially
 
-// Reading sensors function
-void readIMU() {
-  
-};
+//Loop counter
+int i = 0;
+
+// Declare signed integer values that we will read. 
+int16_t ax, ay, az;
+int16_t temp;
+int16_t gx, gy, gz;
+
+//Declare converted float variables
+float ax_g, ay_g, az_g, a_magm;
+float a_bias_x, a_bias_y, a_bias_z; // per-axis accelerometer bias
+float temp_c;
+float gx_dps, gy_dps, gz_dps, g_mag;
+float g_bias_x, g_bias_y, g_bias_z; // per-axis gyroscope bias
+float g_pitch, g_yaw, g_roll; // Degree from dps
+
+//Declare additional variables for delta time calculation
+uint32_t prevTime;
+uint32_t currTime;
+float deltaTime;
+bool firstIMURead = true; // Flag to indicate if it's the first IMU reading, used for dt calculation initialization
+
+//Function Declarations
+void readIMU();
 
 void setup() {
   Serial.begin(115200);
@@ -53,13 +58,96 @@ void setup() {
   Wire.endTransmission(); // Stop assumed true when brackets are empty
   
   delay(100); // Short delay to allow IMU to process configuration changes
-  for (int j = 0; j < 500; j++) { 
-    delay(10); // Delay between readings during stabilization
+  for (int j = 0; j < 500; j++) {
+    readIMU(); // Read sensors multiple times to allow them to stabilize and get a good estimate of bias
     
+    // Accumulate raw values for bias calculation
+    a_bias_x += ax_g; 
+    a_bias_y += ay_g;
+    a_bias_z += az_g;
+    g_bias_x += gx_dps;
+    g_bias_y += gy_dps;
+    g_bias_z += gz_dps;
+    
+    delay(20); // Short delay between readings
   }
+
+  // compute average bias values once
+  a_bias_x /= 500.0;
+  a_bias_y /= 500.0;
+  a_bias_z /= 500.0;
+  g_bias_x /= 500.0;
+  g_bias_y /= 500.0;
+  g_bias_z /= 500.0;
+  
+  a_bias_z -= 1.0; //Assumes IMU is flat horizontally. Adjust based on orientation.
+
+  //Print biases
+  Serial.print("\nAccel biases: x=");
+  Serial.print(a_bias_x);
+  Serial.print(" y=");
+  Serial.print(a_bias_y);
+  Serial.print(" z=");
+  Serial.println(a_bias_z);
+  Serial.print("Gyro biases: x=");
+  Serial.print(g_bias_x);
+  Serial.print(" y=");
+  Serial.print(g_bias_y);
+  Serial.print(" z=");
+  Serial.println(g_bias_z);
+
+  firstIMURead = true; //Reset deltatime since we'll need it in loop
+  delay(5000); 
 }
 
 void loop() { //Reading sensors loop
+
+  readIMU(); // Read sensors and print values to Serial Monitor
+             
+  //Correct for bias by subtracting the average bias calculated during setup from each measurement. This helps to improve accuracy by accounting for any consistent offset in the sensor readings.
+  ax_g -= a_bias_x;
+  ay_g -= a_bias_y;
+  az_g -= a_bias_z;
+  gx_dps -= g_bias_x;
+  gy_dps -= g_bias_y;
+  gz_dps -= g_bias_z;
+
+  Serial.print("dt: ");
+  Serial.println(deltaTime, 6);
+  
+  // Print corrected (bias‑subtracted) values
+  Serial.print("Corrected ax:"); Serial.print(ax_g);
+  Serial.print(" ay:"); Serial.print(ay_g);
+  Serial.print(" az:"); Serial.println(az_g);
+  Serial.print("a_mag:"); Serial.print(sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g));
+  Serial.print("\nCorrected gx:"); Serial.print(gx_dps);
+  Serial.print(" gy:"); Serial.print(gy_dps);
+  Serial.print(" gz:"); Serial.println(gz_dps);
+  Serial.print(" g_mag:"); Serial.println(sqrt(gx_dps*gx_dps + gy_dps*gy_dps + gz_dps*gz_dps));
+
+  // WIth wires pointed backwards, towards screwholes: gx = roll, gy = pitch, gz = yaw. So we can integrate gyroscope values over time to get an estimate of orientation in degrees. This is a simple approach and can drift over time, but it's a good starting point for understanding the basics of IMU data processing. 
+  g_pitch += gy_dps * deltaTime; // Integrate pitch rate to get pitch angle
+  g_roll += gx_dps * deltaTime; // Integrate roll rate to get roll angle
+  g_yaw += gz_dps * deltaTime; // Integrate yaw rate to get yaw angle
+  
+  Serial.print("\n\nEstimated orientation (degrees): pitch=");
+  Serial.print(g_pitch);
+  Serial.print(" roll=");
+  Serial.print(g_roll);
+  Serial.print(" yaw=");
+  Serial.println(g_yaw);
+
+  //delay(1000);
+
+}
+
+// put function definitions here:
+int myFunction(int x, int y) {
+  return x + y;
+}
+
+// Reading sensors function
+void readIMU() {
                          
   //Setup transmission
   Wire.beginTransmission(IMU_ADDRESS);
@@ -72,53 +160,60 @@ void loop() { //Reading sensors loop
   uint8_t axLow = Wire.read();
   ax = (axHigh << 8) | axLow; // Combine high byte with low byte
   ax_g = ax / 4096.0; // Converts raw to actual g value. Since accelerometer output is 16-bit signed, values go from: -32768 → +32767, with the ends representing ±8g.
-  Serial.print("\nax: "); Serial.print(ax_g);
+  //Serial.print("\nax: "); Serial.print(ax_g);
 
   uint8_t ayHigh = Wire.read();
   uint8_t ayLow = Wire.read();
   ay = (ayHigh << 8) | ayLow; // Combine high byte with low byte
   ay_g = ay / 4096.0; // Converts raw to actual g value. 
-  Serial.print(" ay: "); Serial.print(ay_g);
+  //Serial.print(" ay: "); Serial.print(ay_g);
 
   uint8_t azHigh = Wire.read();
   uint8_t azLow = Wire.read();
   az = (azHigh << 8) | azLow; // Combine high byte with low byte
   az_g = az / 4096.0; // Converts raw to actual g value. 
-  Serial.print(" az: "); Serial.print(az_g);
+  //Serial.print(" az: "); Serial.print(az_g);
   
   //Calculate magnitude of acceleration vector, which is useful for detecting events like impacts or free falls.
   float a_mag = sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
-  Serial.print(" | a_mag: "); Serial.println(a_mag); 
+  //Serial.print(" | a_mag: "); Serial.println(a_mag); 
 
   uint8_t tempHigh = Wire.read();
   uint8_t tempLow = Wire.read();
   temp = (tempHigh << 8) | tempLow; // Combine high byte with low byte
   temp_c = (temp/340.0) + 36.53; // Converts raw to real temp
-  Serial.print("temp: "); Serial.println(temp_c);
+  //Serial.print("temp: "); Serial.println(temp_c);
 
   uint8_t gxHigh = Wire.read();
   uint8_t gxLow = Wire.read();
   gx = (gxHigh << 8) | gxLow; // Combine high byte with low byte
-  gx_dps = gx / 16.384; // Converts raw to actual rotation value
-  Serial.print("gx: "); Serial.print(gx_dps);
+  gx_dps = gx / 16.4; // Converts raw to actual rotation value
+  //Serial.print("gx: "); Serial.print(gx_dps);
 
   uint8_t gyHigh = Wire.read();
   uint8_t gyLow = Wire.read();
   gy = (gyHigh << 8) | gyLow; // Combine high byte with low byte
-  gy_dps = gy / 16.384; // Converts raw to actual rotation value
-  Serial.print(" gy: "); Serial.print(gy_dps);
+  gy_dps = gy / 16.4; // Converts raw to actual rotation value
+  //Serial.print(" gy: "); Serial.print(gy_dps);
 
   uint8_t gzHigh = Wire.read();
   uint8_t gzLow = Wire.read();
   gz = (gzHigh << 8) | gzLow; // Combine high byte with low byte
-  gz_dps = gz / 16.384; // Converts raw to actual rotation value
-  Serial.print(" gz: "); Serial.println(gz_dps);
+  gz_dps = gz / 16.4; // Converts raw to actual rotation value
+  //Serial.print(" gz: "); Serial.println(gz_dps);
+  
+  currTime = micros();
+  // Add time tracking to adjust multiply with dps to get degrees alone, later.
+  if (firstIMURead) {
+    prevTime = currTime;
+    deltaTime = 0.0;
+    firstIMURead = false;
+  }
+  else {
+    deltaTime = (currTime - prevTime) / 1000000.0; // Get seconds from microseconds
+    prevTime = currTime;
+    //Serial.print("dt: ");
+    //Serial.println(deltaTime, 6);
+  }
 
-  delay(200);
-
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
 }
