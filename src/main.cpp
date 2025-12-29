@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <math.h>
 #include <Wire.h>
 //Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
@@ -24,10 +25,14 @@ int16_t gx, gy, gz;
 //Declare converted float variables
 float ax_g, ay_g, az_g, a_magm;
 float a_bias_x, a_bias_y, a_bias_z; // per-axis accelerometer bias
+float pitch_acc, roll_acc; // Angle estimates from accelerometer alone, in degrees. These are noisy but don't drift over time like the gyroscopes, so we can combine them in filter for ultimate accuracy
 float temp_c;
 float gx_dps, gy_dps, gz_dps, g_mag;
 float g_bias_x, g_bias_y, g_bias_z; // per-axis gyroscope bias
-float g_pitch, g_yaw, g_roll; // Degree from dps
+float g_pitch, g_yaw, g_roll; // Degree from dps DELETEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+float pitch, yaw, roll; // Degree from accelerometer and gyro fusion
+float alpha = 0.99; // Alpha value for complementary filter. Higher means more reliance on gyroscope vs. accelerometer
+bool firstSerialRead = true;
 
 //Declare additional variables for delta time calculation
 uint32_t prevTime;
@@ -125,20 +130,22 @@ void loop() { //Reading sensors loop
   Serial.print(" gz:"); Serial.println(gz_dps);
   Serial.print(" g_mag:"); Serial.println(sqrt(gx_dps*gx_dps + gy_dps*gy_dps + gz_dps*gz_dps));
 
-  // WIth wires pointed backwards, towards screwholes: gx = roll, gy = pitch, gz = yaw. So we can integrate gyroscope values over time to get an estimate of orientation in degrees. This is a simple approach and can drift over time, but it's a good starting point for understanding the basics of IMU data processing. 
-  g_pitch += gy_dps * deltaTime; // Integrate pitch rate to get pitch angle
-  g_roll += gx_dps * deltaTime; // Integrate roll rate to get roll angle
-  g_yaw += gz_dps * deltaTime; // Integrate yaw rate to get yaw angle
+  //Inverse tangent of accel values for pitch and roll estimates
+  pitch_acc = atan2(ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI; // inverse tan of (gravity along axis / perpendicular). Converts radians to degrees by multiplying by 180/PI.
+  roll_acc  = atan2(ay_g, sqrt(ax_g * ax_g + az_g * az_g)) * 180.0 / PI;
+ 
+  // Use accelerometer angle as initial estimate for complementary filter since gyro isn't an absolute value.
+  if (firstSerialRead) {
+    pitch = pitch_acc; 
+    roll = roll_acc;
+    firstSerialRead = false;
+  } else {
+  pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
+  roll = alpha * (roll + gx_dps * deltaTime) + (1 - alpha) * roll_acc;
+  }
   
-  Serial.print("\n\nEstimated orientation (degrees): pitch=");
-  Serial.print(g_pitch);
-  Serial.print(" roll=");
-  Serial.print(g_roll);
-  Serial.print(" yaw=");
-  Serial.println(g_yaw);
 
   //delay(1000);
-
 }
 
 // put function definitions here:
