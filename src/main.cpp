@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <math.h>
 #include <Wire.h>
+#include <I2CHelpers.h>
 //Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
 //Define GPIO pins
@@ -29,10 +30,11 @@ float pitch_acc, roll_acc; // Angle estimates from accelerometer alone, in degre
 float temp_c;
 float gx_dps, gy_dps, gz_dps, g_mag;
 float g_bias_x, g_bias_y, g_bias_z; // per-axis gyroscope bias
-float g_pitch, g_yaw, g_roll; // Degree from dps DELETEEEEEEEEEEEEEEEEEEEEEEEEEEEE
-float pitch, yaw, roll; // Degree from accelerometer and gyro fusion
+                                  
+// Complementary fusion values
+float pitch, yaw, roll; // Pitch and Roll from accelerometer and gyro fusion, yaw from just gyro
 float alpha = 0.99; // Alpha value for complementary filter. Higher means more reliance on gyroscope vs. accelerometer
-bool firstSerialRead = true;
+bool firstFilterUpdate = true;
 
 //Declare additional variables for delta time calculation
 uint32_t prevTime;
@@ -46,25 +48,15 @@ void readIMU();
 void setup() {
   Serial.begin(115200);
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
-
-  Wire.beginTransmission(IMU_ADDRESS); //Device address to start transmission
-  Wire.write(SLEEP_REGISTER); //Register address to write from
-  Wire.write(0); // Disable sleep mode by overwriting enabled (0x40)
-  Wire.endTransmission(); // Future additions go to consecutive registers and that one register write is complete, so we end transmission for now.
-
-  Wire.beginTransmission(IMU_ADDRESS);
-  Wire.write(ACCEL_CONFIG_REGISTER);
-  Wire.write(0x10); // Sets acceleration measurement range to ±8g, compromise between high precision like ±2g and high range like ±16g. Range is selected by bits 3-4 in the configuration register. 
-  Wire.endTransmission();
-
-  Wire.beginTransmission(IMU_ADDRESS);
-  Wire.write(GYRO_CONFIG_REGISTER);
-  Wire.write(0x18); // Sets gyroscope measurement range to ±2000°/s
-  Wire.endTransmission(); // Stop assumed true when brackets are empty
+  Wire.setClock(400000); // Use I2C in fast mode
+  
+  writeRegisters(IMU_ADDRESS, SLEEP_REGISTER, 0); // Disable sleep mode by overwriting enabled (0x40)
+  writeRegisters(IMU_ADDRESS, ACCEL_CONFIG_REGISTER, 0x10); // Sets acceleration measurement range to ±8g, compromise between high precision like ±2g and high range like ±16g. Range is selected by bits 3-4 in the configuration register.
+  writeRegisters(IMU_ADDRESS, GYRO_CONFIG_REGISTER, 0x18); // Sets gyroscope measurement range to ±2000°/s
   
   delay(100); // Short delay to allow IMU to process configuration changes
   for (int j = 0; j < 500; j++) {
-    readIMU(); // Read sensors multiple times to allow them to stabilize and get a good estimate of bias
+    readIMU(); // Get large sample of sensor data so it stabilizes and you get a good estimate of bias
     
     // Accumulate raw values for bias calculation
     a_bias_x += ax_g; 
@@ -117,6 +109,7 @@ void loop() { //Reading sensors loop
   gy_dps -= g_bias_y;
   gz_dps -= g_bias_z;
 
+  // Elapsed time between IMU samples in seconds. Used for gyro integration.
   Serial.print("dt: ");
   Serial.println(deltaTime, 6);
   
@@ -135,15 +128,18 @@ void loop() { //Reading sensors loop
   roll_acc  = atan2(ay_g, sqrt(ax_g * ax_g + az_g * az_g)) * 180.0 / PI;
  
   // Use accelerometer angle as initial estimate for complementary filter since gyro isn't an absolute value.
-  if (firstSerialRead) {
+  if (firstFilterUpdate) {
     pitch = pitch_acc; 
     roll = roll_acc;
-    firstSerialRead = false;
+    firstFilterUpdate = false;
   } else {
-  pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
-  roll = alpha * (roll + gx_dps * deltaTime) + (1 - alpha) * roll_acc;
+    // Integrate gyro rates over deltaTime, then blend with accel angle to limit drift.
+    pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
+    roll = alpha * (roll + gx_dps * deltaTime) + (1 - alpha) * roll_acc;
   }
   
+  // Yaw has no accelerometer reference, so it is pure gyro integration.
+  yaw = gz_dps * deltaTime; 
 
   //delay(1000);
 }
@@ -155,72 +151,32 @@ int myFunction(int x, int y) {
 
 // Reading sensors function
 void readIMU() {
-                         
-  //Setup transmission
-  Wire.beginTransmission(IMU_ADDRESS);
-  Wire.write(ACCEL_REGISTER); //Register address to read from 
-  Wire.endTransmission(false); //endTransmission causes library to: send the START condition, sends the address, sends all buffered bytes. Here, adding "false" param means it does a repeated start instead of stopping (so the register pointer won't get reset and the IMU can expect to be read from now.), but still do everything else.
-  Wire.requestFrom(IMU_ADDRESS, 14); 
   
-  //I2C transfers 8 bits (1 byte) at a time so each measurement (16 bits total) is split into 2, which we must combine ourselves. 
-  uint8_t axHigh = Wire.read();
-  uint8_t axLow = Wire.read();
-  ax = (axHigh << 8) | axLow; // Combine high byte with low byte
-  ax_g = ax / 4096.0; // Converts raw to actual g value. Since accelerometer output is 16-bit signed, values go from: -32768 → +32767, with the ends representing ±8g.
-  //Serial.print("\nax: "); Serial.print(ax_g);
+  uint8_t raw[14];
+  if (!readRegisters(IMU_ADDRESS, ACCEL_REGISTER, raw, 14)) return; // Read all the IMU sensor data into raw array
 
-  uint8_t ayHigh = Wire.read();
-  uint8_t ayLow = Wire.read();
-  ay = (ayHigh << 8) | ayLow; // Combine high byte with low byte
-  ay_g = ay / 4096.0; // Converts raw to actual g value. 
-  //Serial.print(" ay: "); Serial.print(ay_g);
+  /* Convert raw accelerometer values to g. Output is 16-bit signed and maps to +-8g at this range. */
+  ax_g = (int16_t)(raw[0]  << 8 | raw[1])  / 4096.0f;
+  ay_g = (int16_t)(raw[2]  << 8 | raw[3])  / 4096.0f;
+  az_g = (int16_t)(raw[4]  << 8 | raw[5])  / 4096.0f;
+  // raw[6] and raw[7] are temperature. Not necessary for this so we skip.
+  /* Convert raw gyroscope values to degrees/second. */
+  gx_dps = (int16_t)(raw[8]  << 8 | raw[9])  / 16.4f;
+  gy_dps = (int16_t)(raw[10] << 8 | raw[11]) / 16.4f;
+  gz_dps = (int16_t)(raw[12] << 8 | raw[13]) / 16.4f;
 
-  uint8_t azHigh = Wire.read();
-  uint8_t azLow = Wire.read();
-  az = (azHigh << 8) | azLow; // Combine high byte with low byte
-  az_g = az / 4096.0; // Converts raw to actual g value. 
-  //Serial.print(" az: "); Serial.print(az_g);
-  
-  //Calculate magnitude of acceleration vector, which is useful for detecting events like impacts or free falls.
-  float a_mag = sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
-  //Serial.print(" | a_mag: "); Serial.println(a_mag); 
-
-  uint8_t tempHigh = Wire.read();
-  uint8_t tempLow = Wire.read();
-  temp = (tempHigh << 8) | tempLow; // Combine high byte with low byte
-  temp_c = (temp/340.0) + 36.53; // Converts raw to real temp
-  //Serial.print("temp: "); Serial.println(temp_c);
-
-  uint8_t gxHigh = Wire.read();
-  uint8_t gxLow = Wire.read();
-  gx = (gxHigh << 8) | gxLow; // Combine high byte with low byte
-  gx_dps = gx / 16.4; // Converts raw to actual rotation value
-  //Serial.print("gx: "); Serial.print(gx_dps);
-
-  uint8_t gyHigh = Wire.read();
-  uint8_t gyLow = Wire.read();
-  gy = (gyHigh << 8) | gyLow; // Combine high byte with low byte
-  gy_dps = gy / 16.4; // Converts raw to actual rotation value
-  //Serial.print(" gy: "); Serial.print(gy_dps);
-
-  uint8_t gzHigh = Wire.read();
-  uint8_t gzLow = Wire.read();
-  gz = (gzHigh << 8) | gzLow; // Combine high byte with low byte
-  gz_dps = gz / 16.4; // Converts raw to actual rotation value
-  //Serial.print(" gz: "); Serial.println(gz_dps);
-  
+  // Start timer to compute deltaTime with.
   currTime = micros();
-  // Add time tracking to adjust multiply with dps to get degrees alone, later.
-  if (firstIMURead) {
-    prevTime = currTime;
-    deltaTime = 0.0;
-    firstIMURead = false;
+  if (firstIMURead) 
+  { 
+    // First sample has no previous timestamp, so force dt to 0.
+    prevTime = currTime; 
+    deltaTime = 0.0f; 
+    firstIMURead = false; 
   }
-  else {
-    deltaTime = (currTime - prevTime) / 1000000.0; // Get seconds from microseconds
-    prevTime = currTime;
-    //Serial.print("dt: ");
-    //Serial.println(deltaTime, 6);
+  else { 
+    // Convert microsecond difference to seconds
+    deltaTime = (currTime - prevTime) / 1000000.0f; 
+    prevTime = currTime; 
   }
-
 }
