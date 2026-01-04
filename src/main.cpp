@@ -10,6 +10,8 @@
 
 // IMU-Specific registers and addresses
 #define IMU_ADDRESS 0x68
+#define SMPLRT_DIV 0x19
+#define MPU_CONFIG 0x1A
 #define GYRO_CONFIG 0x1B
 #define ACCEL_CONFIG 0x1C
 #define FIFO_EN 0x23
@@ -23,7 +25,7 @@
 #define FIFO_COUNT 0x72
 #define FIFO_R_W 0x74
 
-// Full-scale select values (bits [4:3])
+// Full-scale select values (bits [4-3])
 #define ACCEL_FS_2G 0x00
 #define ACCEL_FS_8G 0x10
 #define GYRO_FS_250DPS 0x00
@@ -32,6 +34,7 @@
 // MPU6050 sensitivity conversion factors (LSB per physical unit)
 #define ACCEL_LSB_PER_G_2G 16384.0f
 #define ACCEL_LSB_PER_G_8G 4096.0f
+
 #define GYRO_LSB_PER_DPS_250 131.0f
 #define GYRO_LSB_PER_DPS_2000 16.4f
 
@@ -49,8 +52,8 @@ float gx_dps, gy_dps, gz_dps, g_mag;
 float g_bias_x, g_bias_y, g_bias_z; // per-axis gyroscope bias
 
 // Runtime conversion factors in LSB per unit
-float accelLsbPerG; 
-float gyroLsbPerDps;
+float accelLsbPerG = ACCEL_LSB_PER_G_8G;     // default: +-8g
+float gyroLsbPerDps = GYRO_LSB_PER_DPS_2000; // default: +-2000 dps
                                   
 // Complementary fusion values
 float pitch, yaw, roll; // Pitch and Roll from accelerometer and gyro fusion, yaw from just gyro
@@ -72,50 +75,30 @@ float qZ;
 //Function Declarations
 void getSensors();
 bool dataAvailable();
+bool calibrateBiasFIFO();
 
 void setup() {
   Serial.begin(115200);
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
   Wire.setClock(400000); // Use I2C in fast mode
   
-  writeRegisters(IMU_ADDRESS, PWR_MGMT_1, 0); // Disable sleep mode by overwriting enabled (0x40)
-
-  // Use finer ranges during bias collection for better sensitivity.
-  writeRegisters(IMU_ADDRESS, ACCEL_CONFIG, ACCEL_FS_2G);
-  writeRegisters(IMU_ADDRESS, GYRO_CONFIG, GYRO_FS_250DPS);
-  accelLsbPerG = ACCEL_LSB_PER_G_2G;
-  gyroLsbPerDps = GYRO_LSB_PER_DPS_250;
-  
-  delay(100); // Short delay to allow IMU to process configuration changes
-  for (int j = 0; j < 500; j++) {
-    getSensors(); // Get large sample of sensor data so it stabilizes and you get a good estimate of bias
-    
-    // Accumulate raw values for bias calculation
-    a_bias_x += ax_g; 
-    a_bias_y += ay_g;
-    a_bias_z += az_g;
-    g_bias_x += gx_dps;
-    g_bias_y += gy_dps;
-    g_bias_z += gz_dps;
-    
-    delay(20); // Short delay between readings
+  if (!calibrateBiasFIFO()) {
+    Serial.println("FIFO bias calibration failed; using zero biases.");
+    a_bias_x = a_bias_y = a_bias_z = 0.0f;
+    g_bias_x = g_bias_y = g_bias_z = 0.0f;
   }
 
-  // compute average bias values once
-  a_bias_x /= 500.0;
-  a_bias_y /= 500.0;
-  a_bias_z /= 500.0;
-  g_bias_x /= 500.0;
-  g_bias_y /= 500.0;
-  g_bias_z /= 500.0;
-
-  // Switch back to higher normal ranges after calibration.
-  writeRegisters(IMU_ADDRESS, ACCEL_CONFIG, ACCEL_FS_8G); // Compromise between high precision like ±2g and high range like ±16g.
-  writeRegisters(IMU_ADDRESS, GYRO_CONFIG, GYRO_FS_2000DPS); // Sets gyro to highest range.
-  accelLsbPerG = ACCEL_LSB_PER_G_8G; 
+  // Switch back to higher normal modes and ranges after calibration.
+  writeRegisters(IMU_ADDRESS, PWR_MGMT_1, 0x03); // Re-lock PLL to X-Gyro for stable timing reference
+  writeRegisters(IMU_ADDRESS, SMPLRT_DIV, 0x03); // Drop sample rate to 250Hz (optional, but matches library)
+  writeRegisters(IMU_ADDRESS, MPU_CONFIG, 0x03); // Switch filter to 44Hz (cleaner for runtime complementary filter)//
+  
+  writeRegisters(IMU_ADDRESS, ACCEL_CONFIG, ACCEL_FS_8G);
+  writeRegisters(IMU_ADDRESS, GYRO_CONFIG, GYRO_FS_2000DPS);
+  accelLsbPerG = ACCEL_LSB_PER_G_8G;
   gyroLsbPerDps = GYRO_LSB_PER_DPS_2000;
   
-  a_bias_z -= 1.0; //Assumes IMU is flat horizontally. Adjust based on orientation.
+//  a_bias_z -= 1.0; 
 
   //Print biases
   Serial.print("\nAccel biases: x=");
@@ -174,8 +157,7 @@ void loop() { //Reading sensors loop
     // Integrate gyro rates over deltaTime, then blend with accel angle to limit drift.
     pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
     roll = alpha * (roll + gx_dps * deltaTime) + (1 - alpha) * roll_acc;
-  }
-  
+  } 
   // Yaw has no accelerometer reference, so it is pure gyro integration.
   yaw = gz_dps * deltaTime; 
 
@@ -211,8 +193,7 @@ void getSensors() {
     prevTime = currTime; 
     deltaTime = 0.0f; 
     firstIMURead = false; 
-  }
-  else { 
+  }  else { 
     // Convert microsecond difference to seconds
     deltaTime = (currTime - prevTime) / 1000000.0f; 
     prevTime = currTime; 
@@ -225,4 +206,76 @@ bool dataAvailable() {
     return false;
   }
   return (status & 0x01) != 0;
+}
+
+bool calibrateBiasFIFO() {
+  const uint8_t NUM_ROUNDS = 5; // 5 × 40 samples ≈ 200 total for strong noise reduction.
+  uint8_t data[12];
+  uint8_t fifoCountRaw[2];
+  uint32_t totalPackets = 0;
+  int32_t accelAccum[3] = {0, 0, 0}; 
+  int32_t gyroAccum[3]  = {0, 0, 0};
+
+  a_bias_x = a_bias_y = a_bias_z = 0.0f;
+  g_bias_x = g_bias_y = g_bias_z = 0.0f;
+
+  writeRegisters(IMU_ADDRESS, PWR_MGMT_1, 0x80); // Resets device and clears registers
+  delay(100); // Time delay for hardware reset to take place
+
+  writeRegisters(IMU_ADDRESS, PWR_MGMT_1,         0x00); // Disable sleep mode
+  delay(20); // Small settlement time
+
+  writeRegisters(IMU_ADDRESS, MPU_CONFIG,    0x01); // Set to wide bandwidth for fast response.
+  writeRegisters(IMU_ADDRESS, SMPLRT_DIV,    0x00); // Set sample rate to 1kHz for faster bias testing. Sample rate is gyro output rate (1kHz here) divided by (1 + SMPLRT_DIV) 
+  writeRegisters(IMU_ADDRESS, GYRO_CONFIG,   GYRO_FS_250DPS);
+  writeRegisters(IMU_ADDRESS, ACCEL_CONFIG,  ACCEL_FS_2G);
+
+  for (uint8_t round = 0; round < NUM_ROUNDS; round++) {
+    writeRegisters(IMU_ADDRESS, USER_CTRL, 0x44); // Reset + enable FIFO in one step
+    writeRegisters(IMU_ADDRESS, FIFO_EN,   0x78); // Enables FIFO for X,Y,Z gyros (bits[6-3]) and Accel
+    delay(40); // 4, which is close to max per FIFO of 
+
+    writeRegisters(IMU_ADDRESS, FIFO_EN, 0x00);
+    if (!readRegisters(IMU_ADDRESS, FIFO_COUNT, fifoCountRaw, 2)) return false;
+
+    uint16_t fifoCount = ((uint16_t)fifoCountRaw[0] << 8) | fifoCountRaw[1];
+    if (fifoCount >= 1024) return false;            // FIFO overflow = corrupted data
+    
+    uint16_t packetCount = fifoCount / 12; // 12 bytes per packet: 6 for accel, 6 for gyro.
+    if (packetCount == 0) return false;
+    totalPackets += packetCount;
+
+    for (uint16_t i = 0; i < packetCount; i++) {
+      if (!readRegisters(IMU_ADDRESS, FIFO_R_W, data, 12)) return false;
+
+      // Accumulate the sensor data
+      accelAccum[0] += (int16_t)(((int16_t)data[0] << 8) | data[1]);
+      accelAccum[1] += (int16_t)(((int16_t)data[2] << 8) | data[3]);
+      accelAccum[2] += (int16_t)(((int16_t)data[4] << 8) | data[5]);
+      gyroAccum[0]  += (int16_t)(((int16_t)data[6] << 8) | data[7]);
+      gyroAccum[1]  += (int16_t)(((int16_t)data[8] << 8) | data[9]);
+      gyroAccum[2]  += (int16_t)(((int16_t)data[10] << 8) | data[11]);
+    }
+  }
+
+  int32_t accelBias[3], gyroBias[3];
+  for (int i = 0; i < 3; i++) {
+    accelBias[i] = (int32_t)(accelAccum[i] / (int64_t)totalPackets);
+    gyroBias[i]  = (int32_t)(gyroAccum[i]  / (int64_t)totalPackets);
+  }
+
+  //Assumes IMU is flat horizontally. Adjust based on orientation.
+  if (accelBias[2] > 0) {
+    accelBias[2] -= (int32_t)ACCEL_LSB_PER_G_2G; // Subtract gravity since it's 1g when flat.
+  } else {
+    accelBias[2] += (int32_t)ACCEL_LSB_PER_G_2G; // Add gravity if it's negative, which could happen if the IMU is flipped.
+  }
+  a_bias_x = (float)accelBias[0] / ACCEL_LSB_PER_G_2G;
+  a_bias_y = (float)accelBias[1] / ACCEL_LSB_PER_G_2G;
+  a_bias_z = (float)accelBias[2] / ACCEL_LSB_PER_G_2G;
+  g_bias_x = (float)gyroBias[0]  / GYRO_LSB_PER_DPS_250;
+  g_bias_y = (float)gyroBias[1]  / GYRO_LSB_PER_DPS_250;
+  g_bias_z = (float)gyroBias[2]  / GYRO_LSB_PER_DPS_250;
+
+  return true;
 }
