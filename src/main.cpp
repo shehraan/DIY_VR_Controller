@@ -1,6 +1,7 @@
 #include <Arduino.h>
-#include <math.h>
+//#include <math.h>
 #include <Wire.h>
+#include <MadgwickFilter.h>
 #include <I2CHelpers.h>
 //Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
@@ -64,7 +65,6 @@ bool firstFilterUpdate = true;
 uint32_t prevTime;
 uint32_t currTime;
 float deltaTime;
-bool firstIMURead = true; // Flag to indicate if it's the first IMU reading, used for dt calculation initialization
                           
 // Quarternion variables
 float qW;
@@ -72,10 +72,11 @@ float qX;
 float qY;
 float qZ;
 
+MadgwickFilter madgwickFilter;
+
 //Function Declarations
-void getSensors();
-bool dataAvailable();
 bool calibrateBiasFIFO();
+bool getSensors();
 
 void setup() {
   Serial.begin(115200);
@@ -114,13 +115,16 @@ void setup() {
   Serial.print(" z=");
   Serial.println(g_bias_z);
 
-  firstIMURead = true; //Reset deltatime since we'll need it in loop
-  delay(5000); 
+  madgwickFilter.begin(0.10f);
+  delay(5000);
+  prevTime = micros(); // Seed timer so first loop gets a valid dt
 }
 
 void loop() { //Reading sensors loop
 
-  getSensors(); // Read sensors and print values to Serial Monitor
+  if (!getSensors()) { // Get sensor values
+    return;
+  }
              
   //Correct for bias by subtracting the average bias calculated during setup from each measurement. This helps to improve accuracy by accounting for any consistent offset in the sensor readings.
   ax_g -= a_bias_x;
@@ -152,14 +156,22 @@ void loop() { //Reading sensors loop
   if (firstFilterUpdate) {
     pitch = pitch_acc; 
     roll = roll_acc;
+    yaw = 0.0f;
     firstFilterUpdate = false;
   } else {
     // Integrate gyro rates over deltaTime, then blend with accel angle to limit drift.
     pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
     roll = alpha * (roll + gx_dps * deltaTime) + (1 - alpha) * roll_acc;
+    // Yaw has no accelerometer reference, so it is pure gyro integration.
+    yaw += gz_dps * deltaTime; 
+    if (deltaTime > 0.0f) {
+      madgwickFilter.updateIMU(gx_dps, gy_dps, gz_dps, ax_g, ay_g, az_g, deltaTime);
+    }
   } 
-  // Yaw has no accelerometer reference, so it is pure gyro integration.
-  yaw = gz_dps * deltaTime; 
+
+  Serial.print("Madgwick roll:"); Serial.print(madgwickFilter.getRoll());
+  Serial.print(" pitch:"); Serial.print(madgwickFilter.getPitch());
+  Serial.print(" yaw:"); Serial.println(madgwickFilter.getYaw());
 
   //delay(1000);
 }
@@ -170,10 +182,13 @@ int myFunction(int x, int y) {
 }
 
 // Function to get sensor data and start timer
-void getSensors() {
+bool getSensors() {
+  currTime = micros();
+  deltaTime = (currTime - prevTime) / 1000000.0f;
+  prevTime = currTime;
   
   uint8_t raw[14];
-  if (!readRegisters(IMU_ADDRESS, ACCEL_OUT, raw, 14)) return; // Read all the IMU sensor data into raw array
+  if (!readRegisters(IMU_ADDRESS, ACCEL_OUT, raw, 14)) return false; // Read all the IMU sensor data into raw array
 
   /* Convert raw accelerometer values to g using the active LSB-per-g sensitivity. */
   ax_g = (int16_t)(raw[0]  << 8 | raw[1])  / accelLsbPerG;
@@ -185,27 +200,7 @@ void getSensors() {
   gy_dps = (int16_t)(raw[10] << 8 | raw[11]) / gyroLsbPerDps;
   gz_dps = (int16_t)(raw[12] << 8 | raw[13]) / gyroLsbPerDps;
 
-  // Start timer to compute deltaTime with.
-  currTime = micros();
-  if (firstIMURead) 
-  { 
-    // First sample has no previous timestamp, so force dt to 0.
-    prevTime = currTime; 
-    deltaTime = 0.0f; 
-    firstIMURead = false; 
-  }  else { 
-    // Convert microsecond difference to seconds
-    deltaTime = (currTime - prevTime) / 1000000.0f; 
-    prevTime = currTime; 
-  }
-}
-
-bool dataAvailable() {
-  uint8_t status;
-  if (!readRegisters(IMU_ADDRESS, INT_STATUS, &status)) {
-    return false;
-  }
-  return (status & 0x01) != 0;
+  return true;
 }
 
 bool calibrateBiasFIFO() {
