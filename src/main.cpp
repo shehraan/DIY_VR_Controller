@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <MadgwickFilter.h>
 #include <I2CHelpers.h>
+#include <HIDTransport.h>
 //Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
 //Define GPIO pins
@@ -82,6 +83,7 @@ void setup() {
   Serial.begin(115200);
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
   Wire.setClock(400000); // Use I2C in fast mode
+  HIDTransport::begin();
   
   if (!calibrateBiasFIFO()) {
     Serial.println("FIFO bias calibration failed; using zero biases.");
@@ -172,6 +174,13 @@ void loop() { //Reading sensors loop
   Serial.print("Madgwick roll:"); Serial.print(madgwickFilter.getRoll());
   Serial.print(" pitch:"); Serial.print(madgwickFilter.getPitch());
   Serial.print(" yaw:"); Serial.println(madgwickFilter.getYaw());
+
+  HIDTransport::sendQuaternion(
+    madgwickFilter.getQuatW(),
+    madgwickFilter.getQuatX(),
+    madgwickFilter.getQuatY(),
+    madgwickFilter.getQuatZ()
+  );
 
   //delay(1000);
 }
