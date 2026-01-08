@@ -4,10 +4,15 @@
 
 namespace HIDTransport {
 
-// Initializes the USB HID descriptor used by the Relativty SteamVR driver.
+// Initializes HID transport.
+// ESP32 uses BLE HID.
+// On unsupported targets this becomes a no-op.
 void begin();
 
-// Sends quaternion orientation in Relativty-compatible component order.
+// Returns true when a BLE central is connected and notifications are enabled.
+bool ready();
+
+// Sends quaternion orientation in Controller-compatible component order.
 void sendQuaternion(float w, float x, float y, float z);
 
 }

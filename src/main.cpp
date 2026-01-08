@@ -71,6 +71,8 @@ float gyroLsbPerDps = GYRO_LSB_PER_DPS_2000; // default: +-2000 dps
 float pitch, yaw, roll; // Pitch and Roll from accelerometer and gyro fusion, yaw from just gyro
 float alpha = 0.99; // Alpha value for complementary filter. Higher means more reliance on gyroscope vs. accelerometer
 bool firstFilterUpdate = true;
+bool hidLinkWasReady = false;
+uint32_t lastHidWaitPrintMs = 0;
 
 //Declare additional variables for delta time calculation
 uint32_t prevTime;
@@ -111,6 +113,7 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
   Wire.setClock(400000); // Use I2C in fast mode
   HIDTransport::begin();
+  Serial.println("HID transport initialized.");
 
   bool haveSavedCalibration = loadBiasesFromEEPROM();
   
@@ -219,16 +222,45 @@ void loop() { //Reading sensors loop
   gyroVelY *= FILTER_DROPOFF;
   gyroVelZ *= FILTER_DROPOFF;
 
+  // Temporary runtime check: final orientation values after filtering.
+  Serial.print("Final angles | Complementary r/p/y: ");
+  Serial.print(roll, 2);
+  Serial.print(", ");
+  Serial.print(pitch, 2);
+  Serial.print(", ");
+  Serial.print(yaw, 2);
+  Serial.print(" | Madgwick r/p/y: ");
+  Serial.print(madgwickFilter.getRoll(), 2);
+  Serial.print(", ");
+  Serial.print(madgwickFilter.getPitch(), 2);
+  Serial.print(", ");
+  Serial.println(madgwickFilter.getYaw(), 2);
+
   Serial.print("Madgwick roll:"); Serial.print(madgwickFilter.getRoll());
   Serial.print(" pitch:"); Serial.print(madgwickFilter.getPitch());
   Serial.print(" yaw:"); Serial.println(madgwickFilter.getYaw());
 
-  HIDTransport::sendQuaternion(
-    madgwickFilter.getQuatW(),
-    madgwickFilter.getQuatX(),
-    madgwickFilter.getQuatY(),
-    madgwickFilter.getQuatZ()
-  );
+  bool hidReadyNow = HIDTransport::ready();
+  if (hidReadyNow) {
+    HIDTransport::sendQuaternion(
+      madgwickFilter.getQuatW(),
+      madgwickFilter.getQuatX(),
+      madgwickFilter.getQuatY(),
+      madgwickFilter.getQuatZ()
+    );
+    if (!hidLinkWasReady) {
+      Serial.println("HID link connected. Streaming quaternion reports.");
+    }
+  } else {
+    uint32_t nowMs = millis();
+    if (hidLinkWasReady) {
+      Serial.println("HID link disconnected. Waiting for reconnect...");
+    } else if (nowMs - lastHidWaitPrintMs >= 2000U) {
+      Serial.println("Waiting for HID host connection...");
+      lastHidWaitPrintMs = nowMs;
+    }
+  }
+  hidLinkWasReady = hidReadyNow;
 
   //delay(1000);
 }
