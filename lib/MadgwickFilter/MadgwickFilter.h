@@ -9,6 +9,8 @@ private:
 public:
     MadgwickFilter();
     void begin(float confBeta);
+    void setBeta(float newBeta);
+    float getBeta() const { return beta; }
     
     // Pass in your dt directly from main to avoid clock issues
     void updateIMU(float gx, float gy, float gz, float ax, float ay, float az, float dt);

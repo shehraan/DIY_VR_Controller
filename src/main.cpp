@@ -1,6 +1,7 @@
 #include <Arduino.h>
 //#include <math.h>
 #include <Wire.h>
+#include <EEPROM.h>
 #include <MadgwickFilter.h>
 #include <I2CHelpers.h>
 #include <HIDTransport.h>
@@ -40,6 +41,15 @@
 #define GYRO_LSB_PER_DPS_250 131.0f
 #define GYRO_LSB_PER_DPS_2000 16.4f
 
+#define FILTER_MAX_BETA 0.15f
+#define FILTER_MIN_BETA 0.015f
+#define FILTER_DROPOFF 0.85f
+
+#define CALIB_EEPROM_MAGIC 0xC411B1A5UL
+#define CALIB_MAGIC_ADDR 0
+#define CALIB_DATA_ADDR (CALIB_MAGIC_ADDR + sizeof(uint32_t))
+#define MADGWICK_WARMUP_SAMPLES 500
+
 // Declare signed integer values that we will read. 
 int16_t ax, ay, az;
 int16_t temp;
@@ -73,22 +83,47 @@ float qX;
 float qY;
 float qZ;
 
+float gyroVelX;
+float gyroVelY;
+float gyroVelZ;
+
+struct BiasCalibrationData {
+  float accelBiasX;
+  float accelBiasY;
+  float accelBiasZ;
+  float gyroBiasX;
+  float gyroBiasY;
+  float gyroBiasZ;
+};
+
 MadgwickFilter madgwickFilter;
 
 //Function Declarations
 bool calibrateBiasFIFO();
 bool getSensors();
+bool loadBiasesFromEEPROM();
+void saveBiasesToEEPROM();
+void applyAdaptiveBeta();
+void runWarmupLoop();
 
 void setup() {
   Serial.begin(115200);
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
   Wire.setClock(400000); // Use I2C in fast mode
   HIDTransport::begin();
+
+  bool haveSavedCalibration = loadBiasesFromEEPROM();
   
-  if (!calibrateBiasFIFO()) {
-    Serial.println("FIFO bias calibration failed; using zero biases.");
-    a_bias_x = a_bias_y = a_bias_z = 0.0f;
-    g_bias_x = g_bias_y = g_bias_z = 0.0f;
+  if (!haveSavedCalibration) {
+    if (!calibrateBiasFIFO()) {
+      Serial.println("FIFO bias calibration failed; using zero biases.");
+      a_bias_x = a_bias_y = a_bias_z = 0.0f;
+      g_bias_x = g_bias_y = g_bias_z = 0.0f;
+    } else {
+      saveBiasesToEEPROM();
+    }
+  } else {
+    Serial.println("Loaded calibration biases from EEPROM.");
   }
 
   // Switch back to higher normal modes and ranges after calibration.
@@ -118,8 +153,9 @@ void setup() {
   Serial.println(g_bias_z);
 
   madgwickFilter.begin(0.10f);
-  delay(5000);
-  prevTime = micros(); // Seed timer so first loop gets a valid dt
+  prevTime = micros(); // Seed timer so warmup and first loop get valid dt
+  runWarmupLoop();
+  prevTime = micros();
 }
 
 void loop() { //Reading sensors loop
@@ -135,6 +171,8 @@ void loop() { //Reading sensors loop
   gx_dps -= g_bias_x;
   gy_dps -= g_bias_y;
   gz_dps -= g_bias_z;
+
+  applyAdaptiveBeta();
 
   // Elapsed time between IMU samples in seconds. Used for gyro integration.
   Serial.print("dt: ");
@@ -160,6 +198,9 @@ void loop() { //Reading sensors loop
     roll = roll_acc;
     yaw = 0.0f;
     firstFilterUpdate = false;
+    if (deltaTime > 0.0f) {
+      madgwickFilter.updateIMU(gx_dps, gy_dps, gz_dps, ax_g, ay_g, az_g, deltaTime);
+    }
   } else {
     // Integrate gyro rates over deltaTime, then blend with accel angle to limit drift.
     pitch = alpha * (pitch + gy_dps * deltaTime) + (1 - alpha) * pitch_acc;
@@ -169,7 +210,14 @@ void loop() { //Reading sensors loop
     if (deltaTime > 0.0f) {
       madgwickFilter.updateIMU(gx_dps, gy_dps, gz_dps, ax_g, ay_g, az_g, deltaTime);
     }
-  } 
+  }
+
+  gyroVelX += gx_dps * deltaTime;
+  gyroVelY += gy_dps * deltaTime;
+  gyroVelZ += gz_dps * deltaTime;
+  gyroVelX *= FILTER_DROPOFF;
+  gyroVelY *= FILTER_DROPOFF;
+  gyroVelZ *= FILTER_DROPOFF;
 
   Serial.print("Madgwick roll:"); Serial.print(madgwickFilter.getRoll());
   Serial.print(" pitch:"); Serial.print(madgwickFilter.getPitch());
@@ -282,4 +330,74 @@ bool calibrateBiasFIFO() {
   g_bias_z = (float)gyroBias[2]  / GYRO_LSB_PER_DPS_250;
 
   return true;
+}
+
+bool loadBiasesFromEEPROM() {
+  uint32_t storedMagic = 0;
+  EEPROM.get(CALIB_MAGIC_ADDR, storedMagic);
+  if (storedMagic != CALIB_EEPROM_MAGIC) {
+    return false;
+  }
+
+  BiasCalibrationData stored = {0};
+  EEPROM.get(CALIB_DATA_ADDR, stored);
+
+  a_bias_x = stored.accelBiasX;
+  a_bias_y = stored.accelBiasY;
+  a_bias_z = stored.accelBiasZ;
+  g_bias_x = stored.gyroBiasX;
+  g_bias_y = stored.gyroBiasY;
+  g_bias_z = stored.gyroBiasZ;
+  return true;
+}
+
+void saveBiasesToEEPROM() {
+  BiasCalibrationData stored;
+  stored.accelBiasX = a_bias_x;
+  stored.accelBiasY = a_bias_y;
+  stored.accelBiasZ = a_bias_z;
+  stored.gyroBiasX = g_bias_x;
+  stored.gyroBiasY = g_bias_y;
+  stored.gyroBiasZ = g_bias_z;
+
+  EEPROM.put(CALIB_DATA_ADDR, stored);
+  EEPROM.put(CALIB_MAGIC_ADDR, CALIB_EEPROM_MAGIC);
+}
+
+void applyAdaptiveBeta() {
+  float av = gyroVelX * gyroVelX + gyroVelY * gyroVelY + gyroVelZ * gyroVelZ;
+  if (av > 100.0f) {
+    av = 100.0f;
+  }
+
+  float tunedBeta = av * (FILTER_MAX_BETA - FILTER_MIN_BETA) / 100.0f + FILTER_MIN_BETA;
+  madgwickFilter.setBeta(tunedBeta);
+}
+
+void runWarmupLoop() {
+  for (uint16_t i = 0; i < MADGWICK_WARMUP_SAMPLES; i++) {
+    if (!getSensors()) {
+      continue;
+    }
+
+    float warmAx = ax_g - a_bias_x;
+    float warmAy = ay_g - a_bias_y;
+    float warmAz = az_g - a_bias_z;
+    float warmGx = gx_dps - g_bias_x;
+    float warmGy = gy_dps - g_bias_y;
+    float warmGz = gz_dps - g_bias_z;
+
+    applyAdaptiveBeta();
+    if (deltaTime > 0.0f) {
+      madgwickFilter.updateIMU(warmGx, warmGy, warmGz, warmAx, warmAy, warmAz, deltaTime);
+    }
+
+    gyroVelX += warmGx * deltaTime;
+    gyroVelY += warmGy * deltaTime;
+    gyroVelZ += warmGz * deltaTime;
+    gyroVelX *= FILTER_DROPOFF;
+    gyroVelY *= FILTER_DROPOFF;
+    gyroVelZ *= FILTER_DROPOFF;
+    delay(2);
+  }
 }

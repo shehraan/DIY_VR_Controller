@@ -14,6 +14,10 @@ void MadgwickFilter::begin(float confBeta) {
     q3 = 0.0f;
 }
 
+void MadgwickFilter::setBeta(float newBeta) {
+    beta = newBeta;
+}
+
 void MadgwickFilter::updateIMU(float gx, float gy, float gz, float ax, float ay, float az, float dt) {
     float recipNorm;
     float s0, s1, s2, s3;
