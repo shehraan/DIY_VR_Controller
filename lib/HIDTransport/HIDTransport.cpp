@@ -6,7 +6,6 @@
   #include <BLEDevice.h>
   #include <BLEServer.h>
   #include <BLEHIDDevice.h>
-  #include <BLE2902.h>
   #include <HIDTypes.h>
   #define HIDTRANSPORT_ESP32_BLE_HID 1
 #else
@@ -36,46 +35,22 @@ static constexpr uint16_t kBleAppearanceHidGeneric = 0x03C0;
 #if defined(HIDTRANSPORT_ESP32_BLE_HID)
 bool g_ready = false;
 bool g_connected = false;
-bool g_subscribed = false;
 BLECharacteristic *g_inputReport = nullptr;
-BLE2902 *g_inputReportCccd = nullptr;
-
-bool notificationsEnabled() {
-  if (g_inputReportCccd == nullptr) {
-    return false;
-  }
-
-  uint8_t *cccdValue = g_inputReportCccd->getValue();
-  const size_t len = g_inputReportCccd->getLength();
-
-  if (cccdValue == nullptr || len < 2) {
-    return false;
-  }
-
-  const uint16_t bits =
-      static_cast<uint16_t>(cccdValue[0]) |
-      (static_cast<uint16_t>(cccdValue[1]) << 8);
-
-  return (bits & 0x0001U) != 0U;
-}
 
 void refreshReadyState() {
-  g_subscribed = notificationsEnabled();
-  g_ready = g_connected && g_subscribed && (g_inputReport != nullptr);
+  g_ready = g_connected && (g_inputReport != nullptr);
 }
 
 class ControllerBleServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) override {
     (void)pServer;
     g_connected = true;
-    g_subscribed = false;
-    g_ready = false;
+    refreshReadyState();
   }
 
   void onDisconnect(BLEServer *pServer) override {
     g_connected = false;
-    g_subscribed = false;
-    g_ready = false;
+    refreshReadyState();
     // Keep advertising active so reconnect is seamless.
     pServer->startAdvertising();
   }
@@ -98,9 +73,6 @@ void begin() {
 
   BLEHIDDevice *hid = new BLEHIDDevice(server);
   g_inputReport = hid->inputReport(kReportId);
-  g_inputReportCccd = new BLE2902();
-  g_inputReportCccd->setNotifications(true);
-  g_inputReport->addDescriptor(g_inputReportCccd);
 
   hid->manufacturer()->setValue("Controller");
   hid->pnp(0x02, 0xE502, 0xA111, 0x0110);
@@ -115,8 +87,7 @@ void begin() {
   advertising->start();
 
   g_connected = false;
-  g_subscribed = false;
-  g_ready = false;
+  refreshReadyState();
 #else
   g_ready = false;
   if (!g_warned) {
@@ -155,8 +126,8 @@ void sendQuaternion(float w, float x, float y, float z) {
   if (g_inputReport == nullptr) {
     return;
   }
+  // Update characteristic value only; host can read it directly.
   g_inputReport->setValue(report, sizeof(report));
-  g_inputReport->notify();
 #else
   (void)w;
   (void)x;

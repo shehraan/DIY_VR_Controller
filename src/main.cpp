@@ -1,11 +1,9 @@
 #include <Arduino.h>
-//#include <math.h>
 #include <Wire.h>
 #include <EEPROM.h>
 #include <MadgwickFilter.h>
 #include <I2CHelpers.h>
 #include <HIDTransport.h>
-//Avoided using #include <cmath> for pow() cuz it's slower and heavy
 
 //Define GPIO pins
 #define SDA_PIN 18
@@ -51,16 +49,11 @@
 #define MADGWICK_WARMUP_SAMPLES 500
 
 // Declare signed integer values that we will read. 
-int16_t ax, ay, az;
-int16_t temp;
-int16_t gx, gy, gz;
-
 //Declare converted float variables
-float ax_g, ay_g, az_g, a_magm;
+float ax_g, ay_g, az_g;
 float a_bias_x, a_bias_y, a_bias_z; // per-axis accelerometer bias
 float pitch_acc, roll_acc; // Angle estimates from accelerometer alone, in degrees. These are noisy but don't drift over time like the gyroscopes, so we can combine them in filter for ultimate accuracy
-float temp_c;
-float gx_dps, gy_dps, gz_dps, g_mag;
+float gx_dps, gy_dps, gz_dps;
 float g_bias_x, g_bias_y, g_bias_z; // per-axis gyroscope bias
 
 // Runtime conversion factors in LSB per unit
@@ -78,12 +71,6 @@ uint32_t lastHidWaitPrintMs = 0;
 uint32_t prevTime;
 uint32_t currTime;
 float deltaTime;
-                          
-// Quarternion variables
-float qW;
-float qX;
-float qY;
-float qZ;
 
 float gyroVelX;
 float gyroVelY;
@@ -139,8 +126,6 @@ void setup() {
   accelLsbPerG = ACCEL_LSB_PER_G_8G;
   gyroLsbPerDps = GYRO_LSB_PER_DPS_2000;
   
-//  a_bias_z -= 1.0; 
-
   //Print biases
   Serial.print("\nAccel biases: x=");
   Serial.print(a_bias_x);
@@ -177,20 +162,6 @@ void loop() { //Reading sensors loop
 
   applyAdaptiveBeta();
 
-  // Elapsed time between IMU samples in seconds. Used for gyro integration.
-  Serial.print("dt: ");
-  Serial.println(deltaTime, 6);
-  
-  // Print corrected (bias‑subtracted) values
-  Serial.print("Corrected ax:"); Serial.print(ax_g);
-  Serial.print(" ay:"); Serial.print(ay_g);
-  Serial.print(" az:"); Serial.println(az_g);
-  Serial.print("a_mag:"); Serial.print(sqrt(ax_g*ax_g + ay_g*ay_g + az_g*az_g));
-  Serial.print("\nCorrected gx:"); Serial.print(gx_dps);
-  Serial.print(" gy:"); Serial.print(gy_dps);
-  Serial.print(" gz:"); Serial.println(gz_dps);
-  Serial.print(" g_mag:"); Serial.println(sqrt(gx_dps*gx_dps + gy_dps*gy_dps + gz_dps*gz_dps));
-
   //Inverse tangent of accel values for pitch and roll estimates
   pitch_acc = atan2(ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 180.0 / PI; // inverse tan of (gravity along axis / perpendicular). Converts radians to degrees by multiplying by 180/PI.
   roll_acc  = atan2(ay_g, sqrt(ax_g * ax_g + az_g * az_g)) * 180.0 / PI;
@@ -222,24 +193,6 @@ void loop() { //Reading sensors loop
   gyroVelY *= FILTER_DROPOFF;
   gyroVelZ *= FILTER_DROPOFF;
 
-  // Temporary runtime check: final orientation values after filtering.
-  Serial.print("Final angles | Complementary r/p/y: ");
-  Serial.print(roll, 2);
-  Serial.print(", ");
-  Serial.print(pitch, 2);
-  Serial.print(", ");
-  Serial.print(yaw, 2);
-  Serial.print(" | Madgwick r/p/y: ");
-  Serial.print(madgwickFilter.getRoll(), 2);
-  Serial.print(", ");
-  Serial.print(madgwickFilter.getPitch(), 2);
-  Serial.print(", ");
-  Serial.println(madgwickFilter.getYaw(), 2);
-
-  Serial.print("Madgwick roll:"); Serial.print(madgwickFilter.getRoll());
-  Serial.print(" pitch:"); Serial.print(madgwickFilter.getPitch());
-  Serial.print(" yaw:"); Serial.println(madgwickFilter.getYaw());
-
   bool hidReadyNow = HIDTransport::ready();
   if (hidReadyNow) {
     HIDTransport::sendQuaternion(
@@ -261,13 +214,6 @@ void loop() { //Reading sensors loop
     }
   }
   hidLinkWasReady = hidReadyNow;
-
-  //delay(1000);
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
 }
 
 // Function to get sensor data and start timer

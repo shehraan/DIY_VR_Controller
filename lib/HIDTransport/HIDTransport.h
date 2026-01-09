@@ -9,7 +9,7 @@ namespace HIDTransport {
 // On unsupported targets this becomes a no-op.
 void begin();
 
-// Returns true when a BLE central is connected and notifications are enabled.
+// Returns true when a BLE central is connected.
 bool ready();
 
 // Sends quaternion orientation in Controller-compatible component order.
