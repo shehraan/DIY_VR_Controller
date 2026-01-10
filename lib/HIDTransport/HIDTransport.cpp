@@ -106,7 +106,15 @@ bool ready() {
   return g_ready;
 }
 
-void sendQuaternion(float w, float x, float y, float z) {
+void sendQuaternion(
+  float w,
+  float x,
+  float y,
+  float z,
+  uint8_t buttons,
+  uint16_t joystickX,
+  uint16_t joystickY
+) {
 #if defined(HIDTRANSPORT_ESP32_BLE_HID)
   refreshReadyState();
   if (!g_ready) {
@@ -122,6 +130,11 @@ void sendQuaternion(float w, float x, float y, float z) {
   uint8_t report[kReportLen];
   memset(report, 0, sizeof(report));
   memcpy(report, orderedQuat, sizeof(orderedQuat));
+  report[16] = buttons;
+  report[17] = (uint8_t)(joystickX & 0xFFU);
+  report[18] = (uint8_t)((joystickX >> 8) & 0xFFU);
+  report[19] = (uint8_t)(joystickY & 0xFFU);
+  report[20] = (uint8_t)((joystickY >> 8) & 0xFFU);
 
   if (g_inputReport == nullptr) {
     return;
@@ -133,6 +146,9 @@ void sendQuaternion(float w, float x, float y, float z) {
   (void)x;
   (void)y;
   (void)z;
+  (void)buttons;
+  (void)joystickX;
+  (void)joystickY;
 #endif
 }
 

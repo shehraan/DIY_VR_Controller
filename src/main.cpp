@@ -48,6 +48,13 @@
 #define CALIB_DATA_ADDR (CALIB_MAGIC_ADDR + sizeof(uint32_t))
 #define MADGWICK_WARMUP_SAMPLES 500
 
+// Define Joystick and Button pins
+#define BUTTON_A 12
+#define BUTTON_B 13
+#define JOYSTICK_BUTTON 23
+#define JOYSTICK_X 32
+#define JOYSTICK_Y 33
+
 // Declare signed integer values that we will read. 
 //Declare converted float variables
 float ax_g, ay_g, az_g;
@@ -99,6 +106,12 @@ void setup() {
   Serial.begin(115200);
   Wire.begin(SDA_PIN, SCL_PIN); // Initializes the I2c controller on the ESP32 and sets pins as open-drain outputs.
   Wire.setClock(400000); // Use I2C in fast mode
+  analogReadResolution(12);
+  pinMode(BUTTON_A, INPUT_PULLUP);
+  pinMode(BUTTON_B, INPUT_PULLUP);
+  pinMode(JOYSTICK_BUTTON, INPUT_PULLUP);
+  pinMode(JOYSTICK_X, INPUT);
+  pinMode(JOYSTICK_Y, INPUT);
   HIDTransport::begin();
   Serial.println("HID transport initialized.");
 
@@ -195,11 +208,30 @@ void loop() { //Reading sensors loop
 
   bool hidReadyNow = HIDTransport::ready();
   if (hidReadyNow) {
+    bool buttonAPressed = (digitalRead(BUTTON_A) == LOW);
+    bool buttonBPressed = (digitalRead(BUTTON_B) == LOW);
+    bool joystickPressed = (digitalRead(JOYSTICK_BUTTON) == LOW);
+    uint16_t joystickX = (uint16_t)analogRead(JOYSTICK_X);
+    uint16_t joystickY = (uint16_t)analogRead(JOYSTICK_Y);
+    uint8_t buttons = 0;
+    if (buttonAPressed) {
+      buttons |= 0x01;
+    }
+    if (buttonBPressed) {
+      buttons |= 0x02;
+    }
+    if (joystickPressed) {
+      buttons |= 0x04;
+    }
+
     HIDTransport::sendQuaternion(
       madgwickFilter.getQuatW(),
       madgwickFilter.getQuatX(),
       madgwickFilter.getQuatY(),
-      madgwickFilter.getQuatZ()
+      madgwickFilter.getQuatZ(),
+      buttons,
+      joystickX,
+      joystickY
     );
     if (!hidLinkWasReady) {
       Serial.println("HID link connected. Streaming quaternion reports.");
