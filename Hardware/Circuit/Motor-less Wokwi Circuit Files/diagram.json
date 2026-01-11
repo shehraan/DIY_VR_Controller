@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "author": "Shehraan",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-analog-joystick", "id": "joy", "top": -170, "left": 260, "attrs": {} },
+    { "type": "wokwi-mpu6050", "id": "mpu", "top": 300, "left": 255, "attrs": {} },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn1",
+      "top": 250,
+      "left": -230,
+      "rotate": 90,
+      "attrs": { "label": "BTN1" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn2",
+      "top": 250,
+      "left": -120,
+      "rotate": 90,
+      "attrs": { "label": "BTN2" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "baseR",
+      "top": 129.05,
+      "left": -212.6,
+      "rotate": 180,
+      "attrs": { "value": "1000" }
+    },
+    { "type": "wokwi-buzzer", "id": "vib", "top": 175.2, "left": -382.2, "attrs": {} },
+    {
+      "type": "wokwi-text",
+      "id": "q1Label",
+      "top": 182.4,
+      "left": -499.2,
+      "attrs": { "text": "NPN transistor\n(visual only)" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:3V3", "joy:VCC", "red", [ "h-4.61", "v-19.2", "h293" ] ],
+    [ "esp:GND.2", "joy:GND", "black", [ "h225.64", "v-83" ] ],
+    [ "esp:23", "joy:SEL", "yellow", [ "h216.04", "v-102.2" ] ],
+    [ "esp:33", "joy:HORZ", "purple", [ "h-76.8", "v-115.2", "h379.39", "v-35" ] ],
+    [ "esp:32", "joy:VERT", "blue", [ "h-96", "v-96", "h388.99", "v-44.6" ] ],
+    [ "esp:3V3", "mpu:VCC", "red", [ "h-33.41", "v268.8", "h358.2" ] ],
+    [ "esp:GND.2", "mpu:GND", "black", [ "h225.64", "v276.98" ] ],
+    [ "esp:18", "mpu:SCL", "cyan", [ "h206.44", "v200.18" ] ],
+    [ "esp:4", "mpu:SDA", "green", [ "h196.84", "v161.78" ] ],
+    [ "esp:12", "btn1:1.r", "yellow", [ "h-124.8", "v182.4", "h-9.6" ] ],
+    [ "esp:GND.1", "btn1:2.r", "black", [ "h-110.21", "v182.4", "h-92.4" ] ],
+    [ "esp:13", "btn2:1.r", "yellow", [ "h-52.61", "v163.2", "h-21" ] ],
+    [ "esp:GND.1", "btn2:2.r", "black", [ "h-110.21", "v163.2", "h17.6" ] ],
+    [ "esp:14", "baseR:1", "orange", [ "h-91.01", "h-67.2" ] ],
+    [ "baseR:2", "vib:2", "orange", [ "h-27.6", "v182.4", "h-105.2" ] ],
+    [ "esp:GND.1", "vib:1", "black", [ "h-110.21", "v182.4", "h-249.6", "v-76.8" ] ]
+  ],
+  "dependencies": {}
+}
