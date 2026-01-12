@@ -4,6 +4,12 @@
 
 namespace HIDTransport {
 
+struct RumbleCommand {
+	uint8_t amplitude;
+	uint16_t durationMs;
+	uint8_t flags;
+};
+
 // Initializes HID transport.
 // ESP32 uses BLE HID.
 // On unsupported targets this becomes a no-op.
@@ -23,5 +29,11 @@ void sendQuaternion(
 	uint16_t joystickX = 0,
 	uint16_t joystickY = 0
 );
+
+// Returns true when a new rumble command was received from BLE HID output.
+// Packet format supported:
+// 1) [amplitude][durationMs LSB][durationMs MSB]
+// 2) [0x01][amplitude][durationMs LSB][durationMs MSB][flags]
+bool pollRumbleCommand(RumbleCommand &outCommand);
 
 }
