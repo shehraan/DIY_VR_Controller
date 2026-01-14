@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
+#include "driver/ledc.h"
 #include <MadgwickFilter.h>
 #include <I2CHelpers.h>
 #include <HIDTransport.h>
@@ -94,6 +95,220 @@ struct BiasCalibrationData {
 
 MadgwickFilter madgwickFilter;
 
+namespace Haptics {
+
+static constexpr uint8_t MOTOR_PIN = 14;
+static constexpr uint8_t PWM_CHANNEL = 0;
+static constexpr uint16_t PWM_FREQ_HZ = 200;
+static constexpr uint8_t PWM_RES_BITS = 8;
+static constexpr uint8_t DUTY_LOW = 170;
+static constexpr uint8_t DUTY_MED = 220;
+static constexpr uint8_t DUTY_HIGH = 255;
+static constexpr size_t MAX_STEPS = 8;
+
+enum class HapticClass : uint8_t {
+  NONE = 0,
+  CLICK,
+  TAP,
+  PULSE,
+  HEAVY_PULSE,
+  SHORT_BUZZ,
+  LONG_BUZZ,
+  DOUBLE_CLICK,
+  WARNING_BUZZ
+};
+
+enum class Strength : uint8_t {
+  LEVEL_LOW = 0,
+  LEVEL_MEDIUM,
+  LEVEL_HIGH
+};
+
+struct HapticCommand {
+  HapticClass effect;
+  Strength strength;
+  uint16_t sourceDurationMs;
+  uint8_t sourceAmplitude;
+};
+
+struct HapticStep {
+  uint8_t duty;
+  uint16_t durationMs;
+};
+
+HapticStep steps[MAX_STEPS];
+size_t stepCount = 0;
+size_t stepIndex = 0;
+bool active = false;
+uint32_t stepStartMs = 0;
+
+void motorWrite(uint8_t duty) {
+  ledcWrite(PWM_CHANNEL, duty);
+}
+
+void stop() {
+  motorWrite(0);
+  active = false;
+  stepCount = 0;
+  stepIndex = 0;
+}
+
+uint8_t dutyForStrength(Strength strength) {
+  switch (strength) {
+    case Strength::LEVEL_LOW:
+      return DUTY_LOW;
+    case Strength::LEVEL_HIGH:
+      return DUTY_HIGH;
+    case Strength::LEVEL_MEDIUM:
+    default:
+      return DUTY_MED;
+  }
+}
+
+Strength classifyStrength(uint8_t amplitude) {
+  if (amplitude < 85) {
+    return Strength::LEVEL_LOW;
+  }
+  if (amplitude < 170) {
+    return Strength::LEVEL_MEDIUM;
+  }
+  return Strength::LEVEL_HIGH;
+}
+
+HapticCommand mapRumbleToClass(uint8_t amplitude, uint16_t durationMs) {
+  HapticCommand cmd;
+  cmd.effect = HapticClass::NONE;
+  cmd.strength = classifyStrength(amplitude);
+  cmd.sourceDurationMs = durationMs;
+  cmd.sourceAmplitude = amplitude;
+
+  if (durationMs == 0 || amplitude == 0) {
+    return cmd;
+  }
+
+  if (durationMs <= 30) {
+    cmd.effect = HapticClass::CLICK;
+  } else if (durationMs <= 65) {
+    cmd.effect = HapticClass::TAP;
+  } else if (durationMs <= 120) {
+    cmd.effect = (amplitude >= 180) ? HapticClass::HEAVY_PULSE : HapticClass::PULSE;
+  } else if (durationMs <= 220) {
+    cmd.effect = HapticClass::SHORT_BUZZ;
+  } else {
+    cmd.effect = HapticClass::LONG_BUZZ;
+  }
+
+  if (durationMs <= 45 && amplitude >= 220) {
+    cmd.effect = HapticClass::DOUBLE_CLICK;
+  }
+  if (durationMs >= 350 && amplitude >= 200) {
+    cmd.effect = HapticClass::WARNING_BUZZ;
+  }
+  return cmd;
+}
+
+void pushStep(uint8_t duty, uint16_t durationMs) {
+  if (stepCount < MAX_STEPS) {
+    steps[stepCount].duty = duty;
+    steps[stepCount].durationMs = durationMs;
+    stepCount++;
+  }
+}
+
+void loadPattern(const HapticCommand &cmd) {
+  stepCount = 0;
+  stepIndex = 0;
+  uint8_t baseDuty = dutyForStrength(cmd.strength);
+
+  switch (cmd.effect) {
+    case HapticClass::NONE:
+      pushStep(0, 1);
+      break;
+    case HapticClass::CLICK:
+      pushStep(baseDuty, 25);
+      pushStep(0, 40);
+      break;
+    case HapticClass::TAP:
+      pushStep(baseDuty, 50);
+      pushStep(0, 50);
+      break;
+    case HapticClass::PULSE:
+      pushStep(DUTY_MED, 90);
+      pushStep(0, 60);
+      break;
+    case HapticClass::HEAVY_PULSE:
+      pushStep(DUTY_HIGH, 120);
+      pushStep(0, 70);
+      break;
+    case HapticClass::SHORT_BUZZ:
+      pushStep(baseDuty, 170);
+      pushStep(0, 80);
+      break;
+    case HapticClass::LONG_BUZZ:
+      pushStep(baseDuty, 320);
+      pushStep(0, 100);
+      break;
+    case HapticClass::DOUBLE_CLICK:
+      pushStep(DUTY_HIGH, 25);
+      pushStep(0, 70);
+      pushStep(DUTY_HIGH, 25);
+      pushStep(0, 80);
+      break;
+    case HapticClass::WARNING_BUZZ:
+      pushStep(DUTY_HIGH, 120);
+      pushStep(0, 70);
+      pushStep(DUTY_HIGH, 120);
+      pushStep(0, 70);
+      pushStep(DUTY_HIGH, 120);
+      pushStep(0, 100);
+      break;
+  }
+}
+
+void play(const HapticCommand &cmd) {
+  loadPattern(cmd);
+  if (stepCount == 0) {
+    stop();
+    return;
+  }
+  active = true;
+  stepIndex = 0;
+  stepStartMs = millis();
+  motorWrite(steps[0].duty);
+}
+
+void begin() {
+  ledcSetup(PWM_CHANNEL, PWM_FREQ_HZ, PWM_RES_BITS);
+  ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
+  stop();
+}
+
+void onRumbleCommand(const HIDTransport::RumbleCommand &command) {
+  if ((command.flags & 0x01U) != 0U) {
+    stop();
+  }
+  play(mapRumbleToClass(command.amplitude, command.durationMs));
+}
+
+void update() {
+  if (!active || stepCount == 0) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if ((now - stepStartMs) >= steps[stepIndex].durationMs) {
+    stepIndex++;
+    if (stepIndex >= stepCount) {
+      stop();
+      return;
+    }
+    stepStartMs = now;
+    motorWrite(steps[stepIndex].duty);
+  }
+}
+
+} // namespace Haptics
+
 //Function Declarations
 bool calibrateBiasFIFO();
 bool getSensors();
@@ -112,6 +327,7 @@ void setup() {
   pinMode(JOYSTICK_BUTTON, INPUT_PULLUP);
   pinMode(JOYSTICK_X, INPUT);
   pinMode(JOYSTICK_Y, INPUT);
+  Haptics::begin();
   HIDTransport::begin();
   Serial.println("HID transport initialized.");
 
@@ -160,6 +376,12 @@ void setup() {
 }
 
 void loop() { //Reading sensors loop
+  Haptics::update();
+
+  HIDTransport::RumbleCommand rumbleCommand;
+  if (HIDTransport::pollRumbleCommand(rumbleCommand)) {
+    Haptics::onRumbleCommand(rumbleCommand);
+  }
 
   if (!getSensors()) { // Get sensor values
     return;
