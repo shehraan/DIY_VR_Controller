@@ -38,7 +38,6 @@ static constexpr uint8_t kReportId = 0x01;
 static constexpr uint8_t kOutputReportId = 0x02;
 static constexpr size_t kReportLen = 63;
 static constexpr uint16_t kBleAppearanceHidGeneric = 0x03C0;
-static constexpr const char *kDeviceName = "ESP32-Controller";
 
 #if defined(HIDTRANSPORT_ESP32_BLE_HID)
 bool g_ready = false;
@@ -50,14 +49,44 @@ volatile uint8_t g_pendingAmplitude = 0;
 volatile uint16_t g_pendingDurationMs = 0;
 volatile uint8_t g_pendingFlags = 0;
 
-bool parseRumblePacket(const uint8_t *data, size_t len, uint8_t &amplitude, uint16_t &durationMs) {
-  if (data == nullptr || len < 2U) {
+bool parseRumblePacket(const uint8_t *data, size_t len, uint8_t &amplitude, uint16_t &durationMs, uint8_t &flags) {
+  if (data == nullptr || len == 0U) {
     return false;
   }
 
-  amplitude = data[0];
-  durationMs = (uint16_t)data[1] | ((uint16_t)(len >= 3U ? data[2] : 0U) << 8);
-  return true;
+  amplitude = 0;
+  durationMs = 0;
+  flags = 0;
+
+  if (len == 3U) {
+    amplitude = data[0];
+    durationMs = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+    return true;
+  }
+
+  if (len == 2U) {
+    amplitude = data[0];
+    durationMs = (uint16_t)data[1] * 10U;
+    return true;
+  }
+
+  if (len >= 5U && data[0] == 0x01U) {
+    amplitude = data[1];
+    durationMs = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    flags = data[4];
+    return true;
+  }
+
+  if (len >= 4U && data[0] == kOutputReportId) {
+    amplitude = data[1];
+    durationMs = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    if (len >= 5U) {
+      flags = data[4];
+    }
+    return true;
+  }
+
+  return false;
 }
 
 class ControllerOutputReportCallbacks : public BLECharacteristicCallbacks {
@@ -69,13 +98,14 @@ class ControllerOutputReportCallbacks : public BLECharacteristicCallbacks {
     std::string payload = characteristic->getValue();
     uint8_t amplitude = 0;
     uint16_t durationMs = 0;
-    if (!parseRumblePacket((const uint8_t *)payload.data(), payload.size(), amplitude, durationMs)) {
+    uint8_t flags = 0;
+    if (!parseRumblePacket((const uint8_t *)payload.data(), payload.size(), amplitude, durationMs, flags)) {
       return;
     }
 
     g_pendingAmplitude = amplitude;
     g_pendingDurationMs = durationMs;
-    g_pendingFlags = 0;
+    g_pendingFlags = flags;
     g_hasPendingRumble = true;
   }
 };
@@ -109,7 +139,7 @@ namespace HIDTransport {
 
 void begin() {
 #if defined(HIDTRANSPORT_ESP32_BLE_HID)
-  BLEDevice::init(kDeviceName);
+  BLEDevice::init("Controller-ESP32");
 
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ControllerBleServerCallbacks());
@@ -121,7 +151,7 @@ void begin() {
     g_outputReport->setCallbacks(new ControllerOutputReportCallbacks());
   }
 
-  hid->manufacturer()->setValue("Shehraan");
+  hid->manufacturer()->setValue("Controller");
   hid->pnp(0x02, 0xE502, 0xA111, 0x0110);
   hid->hidInfo(0x00, 0x01);
   hid->reportMap((uint8_t *)kHidReportDescriptor, sizeof(kHidReportDescriptor));
@@ -164,41 +194,31 @@ void sendQuaternion(
   uint16_t joystickY
 ) {
 #if defined(HIDTRANSPORT_ESP32_BLE_HID)
-  static uint32_t packetId = 0;
-  static uint32_t lastSendUs = 0;
-
-  uint32_t nowUs = micros();
-  if ((uint32_t)(nowUs - lastSendUs) < 10000U) {
-    return;
-  }
-  lastSendUs = nowUs;
-
   refreshReadyState();
   if (!g_ready) {
     return;
   }
 
-  uint32_t sendTimeUs = micros();
+  float orderedQuat[4];
+  orderedQuat[0] = w;
+  orderedQuat[1] = y;
+  orderedQuat[2] = z;
+  orderedQuat[3] = x;
 
   uint8_t report[kReportLen];
   memset(report, 0, sizeof(report));
-
-  memcpy(report + 0, &w, 4);
-  memcpy(report + 4, &y, 4);
-  memcpy(report + 8, &z, 4);
-  memcpy(report + 12, &x, 4);
+  memcpy(report, orderedQuat, sizeof(orderedQuat));
   report[16] = buttons;
-  memcpy(report + 17, &joystickX, 2);
-  memcpy(report + 19, &joystickY, 2);
-  memcpy(report + 21, &sendTimeUs, 4);
-  memcpy(report + 25, &packetId, 4);
+  report[17] = (uint8_t)(joystickX & 0xFFU);
+  report[18] = (uint8_t)((joystickX >> 8) & 0xFFU);
+  report[19] = (uint8_t)(joystickY & 0xFFU);
+  report[20] = (uint8_t)((joystickY >> 8) & 0xFFU);
 
   if (g_inputReport == nullptr) {
     return;
   }
+  // Update characteristic value only; host can read it directly.
   g_inputReport->setValue(report, sizeof(report));
-  g_inputReport->notify();
-  packetId++;
 #else
   (void)w;
   (void)x;
@@ -218,7 +238,7 @@ bool pollRumbleCommand(RumbleCommand &outCommand) {
 
   outCommand.amplitude = g_pendingAmplitude;
   outCommand.durationMs = g_pendingDurationMs;
-  outCommand.flags = 0;
+  outCommand.flags = g_pendingFlags;
   g_hasPendingRumble = false;
   return true;
 #else

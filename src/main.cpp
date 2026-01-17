@@ -109,7 +109,7 @@ static constexpr size_t MAX_STEPS = 8;
 enum class HapticClass : uint8_t {
   NONE = 0,
   CLICK,
-  TAP,
+  TAP, //Remove?
   PULSE,
   HEAVY_PULSE,
   SHORT_BUZZ,
@@ -284,9 +284,6 @@ void begin() {
 }
 
 void onRumbleCommand(const HIDTransport::RumbleCommand &command) {
-  if ((command.flags & 0x01U) != 0U) {
-    stop();
-  }
   play(mapRumbleToClass(command.amplitude, command.durationMs));
 }
 
