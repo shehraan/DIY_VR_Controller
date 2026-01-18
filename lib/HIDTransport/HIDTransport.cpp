@@ -168,7 +168,7 @@ void sendQuaternion(
   static uint32_t lastSendUs = 0;
 
   uint32_t nowUs = micros();
-  if ((uint32_t)(nowUs - lastSendUs) < 10000U) {
+  if ((uint32_t)(nowUs - lastSendUs) < 30000U) {
     return;
   }
   lastSendUs = nowUs;

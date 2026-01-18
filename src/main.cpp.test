@@ -1,0 +1,113 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// ── Config ────────────────────────────────────────────────────────────────────
+static constexpr const char *kDeviceName    = "Rumble-ESP32";
+static constexpr const char *kServiceUuid   = "12345678-1234-1234-1234-123456789abc";
+static constexpr const char *kRumbleUuid    = "12345678-1234-1234-1234-123456789abd";
+
+static constexpr uint8_t  kMotorPin   = 14;
+static constexpr uint8_t  kPwmChannel = 0;
+static constexpr uint16_t kPwmFreqHz  = 200;
+static constexpr uint8_t  kPwmResBits = 8;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+bool     g_connected       = false;
+bool     g_motorOn         = false;
+uint32_t g_motorStopAtMs   = 0;
+
+void motorWrite(uint8_t duty) { ledcWrite(kPwmChannel, duty); }
+
+// ── Rumble packet handler ─────────────────────────────────────────────────────
+// Packet format (2 bytes): [amplitude 0-255] [duration_tenths_of_ms 0-255]
+// e.g. [200, 100] = amplitude 200, duration 1000 ms
+void handleRumble(const uint8_t *data, size_t len) {
+  if (len < 2) {
+    Serial.printf("[RUMBLE] Bad packet len=%u\n", (unsigned)len);
+    return;
+  }
+  uint8_t amplitude    = data[0];
+  uint16_t durationMs  = (uint16_t)data[1] * 10;  // tenths → ms
+
+  Serial.printf("[RUMBLE] amp=%u dur=%ums\n", amplitude, durationMs);
+
+  if (amplitude == 0 || durationMs == 0) {
+    motorWrite(0);
+    g_motorOn = false;
+    return;
+  }
+
+  motorWrite(amplitude);
+  g_motorOn       = true;
+  g_motorStopAtMs = millis() + durationMs;
+}
+
+// ── BLE callbacks ─────────────────────────────────────────────────────────────
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *s) override {
+    (void)s;
+    g_connected = true;
+    Serial.println("Client connected.");
+  }
+  void onDisconnect(BLEServer *s) override {
+    g_connected = false;
+    motorWrite(0);
+    g_motorOn = false;
+    Serial.println("Client disconnected — restarting advertising.");
+    s->startAdvertising();
+  }
+};
+
+class RumbleCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *c) override {
+    std::string v = c->getValue();
+    handleRumble(reinterpret_cast<const uint8_t *>(v.data()), v.size());
+  }
+};
+
+// ── setup ─────────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("===== Rumble BLE =====");
+
+  BLEDevice::init(kDeviceName);
+  BLEServer  *server  = BLEDevice::createServer();
+  server->setCallbacks(new ServerCallbacks());
+
+  BLEService *service = server->createService(kServiceUuid);
+  BLECharacteristic *rumbleChar = service->createCharacteristic(
+    kRumbleUuid,
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+  );
+  rumbleChar->setCallbacks(new RumbleCallbacks());
+  service->start();
+
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(kServiceUuid);
+  adv->setScanResponse(true);
+  adv->start();
+
+  // PWM init AFTER BLE init — BLE stack resets hardware timers on init
+  // and would wipe any LEDC config set before it.
+  ledcSetup(kPwmChannel, kPwmFreqHz, kPwmResBits);
+  ledcAttachPin(kMotorPin, kPwmChannel);
+  motorWrite(0);
+  Serial.printf("Motor PWM on pin %u\n", (unsigned)kMotorPin);
+
+  Serial.printf("Advertising as \"%s\"\n", kDeviceName);
+  Serial.println("Packet format: [amplitude 0-255, duration_x10ms 0-255]");
+}
+
+// ── loop ──────────────────────────────────────────────────────────────────────
+void loop() {
+  if (g_motorOn && (millis() >= g_motorStopAtMs)) {
+    motorWrite(0);
+    g_motorOn = false;
+    Serial.println("[RUMBLE] Done.");
+  }
+  delay(1);
+}

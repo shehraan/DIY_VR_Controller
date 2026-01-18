@@ -1,0 +1,335 @@
+#include <Arduino.h>
+#include <Wire.h>
+
+// Pin map from main.cpp
+#define SDA_PIN 18
+#define SCL_PIN 4
+#define BUTTON_A 12
+#define BUTTON_B 13
+#define JOYSTICK_BUTTON 25
+#define JOYSTICK_X 32
+#define JOYSTICK_Y 33
+
+// MPU6050
+#define IMU_ADDRESS 0x68
+#define WHO_AM_I_REG 0x75
+#define PWR_MGMT_1 0x6B
+#define ACCEL_OUT 0x3B
+
+struct TestResult {
+  const char *name;
+  bool passed;
+  String detail;
+};
+
+static TestResult g_results[12];
+static size_t g_resultCount = 0;
+
+void addResult(const char *name, bool passed, const String &detail) {
+  if (g_resultCount >= (sizeof(g_results) / sizeof(g_results[0]))) {
+    return;
+  }
+  g_results[g_resultCount++] = {name, passed, detail};
+}
+
+void printBanner() {
+  Serial.println();
+  Serial.println("==============================================");
+  Serial.println(" VR Controller Full Input Diagnostic");
+  Serial.println("==============================================");
+}
+
+bool i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t *buf, size_t len) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  size_t got = Wire.requestFrom((int)addr, (int)len, (int)true);
+  if (got != len) {
+    return false;
+  }
+
+  for (size_t i = 0; i < len; i++) {
+    buf[i] = Wire.read();
+  }
+  return true;
+}
+
+bool i2cWriteByte(uint8_t addr, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission(true) == 0;
+}
+
+bool runI2CScan(String &detail) {
+  bool found68 = false;
+  bool found69 = false;
+  uint8_t foundCount = 0;
+
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission(true);
+    if (err == 0) {
+      foundCount++;
+      if (addr == 0x68) found68 = true;
+      if (addr == 0x69) found69 = true;
+    }
+  }
+
+  detail = "devices=" + String(foundCount) + ", imu@0x68=" + String(found68 ? "yes" : "no") + ", imu@0x69=" + String(found69 ? "yes" : "no");
+  return found68 || found69;
+}
+
+bool testIMUPresence(String &detail) {
+  uint8_t who = 0;
+  if (!i2cReadBytes(IMU_ADDRESS, WHO_AM_I_REG, &who, 1)) {
+    detail = "read WHO_AM_I failed at 0x68";
+    return false;
+  }
+
+  if (who != 0x68) {
+    detail = "unexpected WHO_AM_I=0x" + String(who, HEX);
+    return false;
+  }
+
+  bool woke = i2cWriteByte(IMU_ADDRESS, PWR_MGMT_1, 0x00);
+  detail = String("WHO_AM_I=0x68, wake=") + (woke ? "ok" : "failed");
+  return woke;
+}
+
+bool testIMUStreaming(String &detail) {
+  const uint16_t samplesTarget = 120;
+  uint16_t good = 0;
+  uint16_t bad = 0;
+  int16_t lastAx = 0;
+  bool sawChange = false;
+
+  for (uint16_t i = 0; i < samplesTarget; i++) {
+    uint8_t raw[14];
+    if (!i2cReadBytes(IMU_ADDRESS, ACCEL_OUT, raw, sizeof(raw))) {
+      bad++;
+      delay(2);
+      continue;
+    }
+
+    int16_t ax = (int16_t)((raw[0] << 8) | raw[1]);
+    if (i > 0 && abs(ax - lastAx) > 3) {
+      sawChange = true;
+    }
+    lastAx = ax;
+    good++;
+    delay(2);
+  }
+
+  float successRate = (samplesTarget == 0) ? 0.0f : (100.0f * (float)good / (float)samplesTarget);
+  detail = "ok=" + String(good) + ", fail=" + String(bad) + ", success=" + String(successRate, 1) + "%, changing=" + String(sawChange ? "yes" : "no");
+
+  return (successRate >= 90.0f) && sawChange;
+}
+
+bool waitForState(uint8_t pin, uint8_t expectedState, uint32_t timeoutMs) {
+  uint32_t start = millis();
+  while ((millis() - start) < timeoutMs) {
+    if (digitalRead(pin) == expectedState) {
+      return true;
+    }
+    delay(2);
+  }
+  return false;
+}
+
+bool testButtonPressRelease(uint8_t pin, const char *label, String &detail) {
+  Serial.println();
+  Serial.print("[ACTION] ");
+  Serial.print(label);
+  Serial.println(": release button now...");
+  bool released = waitForState(pin, HIGH, 3000);
+
+  Serial.print("[ACTION] ");
+  Serial.print(label);
+  Serial.println(": press and hold now...");
+  bool pressed = waitForState(pin, LOW, 5000);
+
+  Serial.print("[ACTION] ");
+  Serial.print(label);
+  Serial.println(": release again...");
+  bool releasedAgain = waitForState(pin, HIGH, 5000);
+
+  detail = String("released=") + (released ? "ok" : "timeout") +
+           ", pressed=" + (pressed ? String("ok") : String("timeout")) +
+           ", releasedAgain=" + (releasedAgain ? String("ok") : String("timeout"));
+
+  return released && pressed && releasedAgain;
+}
+
+bool testJoystickAxis(uint8_t pin, const char *label, String &detail) {
+  Serial.println();
+  Serial.print("[ACTION] Move ");
+  Serial.print(label);
+  Serial.println(" fully in both directions for 4 seconds...");
+
+  uint16_t minV = 4095;
+  uint16_t maxV = 0;
+  uint32_t start = millis();
+
+  while ((millis() - start) < 4000) {
+    uint16_t v = (uint16_t)analogRead(pin);
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+    delay(2);
+  }
+
+  uint16_t span = (maxV >= minV) ? (maxV - minV) : 0;
+  bool pass = span > 1200;
+
+  detail = "min=" + String(minV) + ", max=" + String(maxV) + ", span=" + String(span) + " (need >1200)";
+  return pass;
+}
+
+bool testIMUMotion(String &detail) {
+  Serial.println();
+  Serial.println("[ACTION] Move/rotate the controller for 3 seconds...");
+
+  const float gyroLsbPerDps2000 = 16.4f;
+  uint16_t aboveThresholdCount = 0;
+  uint16_t validSamples = 0;
+  uint32_t start = millis();
+
+  while ((millis() - start) < 3000) {
+    uint8_t raw[14];
+    if (!i2cReadBytes(IMU_ADDRESS, ACCEL_OUT, raw, sizeof(raw))) {
+      delay(2);
+      continue;
+    }
+
+    int16_t gx = (int16_t)((raw[8] << 8) | raw[9]);
+    int16_t gy = (int16_t)((raw[10] << 8) | raw[11]);
+    int16_t gz = (int16_t)((raw[12] << 8) | raw[13]);
+
+    float gxDps = fabsf((float)gx / gyroLsbPerDps2000);
+    float gyDps = fabsf((float)gy / gyroLsbPerDps2000);
+    float gzDps = fabsf((float)gz / gyroLsbPerDps2000);
+
+    if (gxDps > 20.0f || gyDps > 20.0f || gzDps > 20.0f) {
+      aboveThresholdCount++;
+    }
+    validSamples++;
+    delay(2);
+  }
+
+  bool pass = (validSamples > 50) && (aboveThresholdCount > 10);
+  detail = "validSamples=" + String(validSamples) + ", activeGyroSamples=" + String(aboveThresholdCount);
+  return pass;
+}
+
+void printSummary() {
+  Serial.println();
+  Serial.println("============== TEST SUMMARY ==============");
+
+  size_t passedCount = 0;
+  for (size_t i = 0; i < g_resultCount; i++) {
+    const TestResult &r = g_results[i];
+    Serial.print(r.passed ? "[PASS] " : "[FAIL] ");
+    Serial.print(r.name);
+    Serial.print(" -> ");
+    Serial.println(r.detail);
+    if (r.passed) {
+      passedCount++;
+    }
+  }
+
+  Serial.println("------------------------------------------");
+  Serial.print("Overall: ");
+  Serial.print(passedCount);
+  Serial.print("/");
+  Serial.print(g_resultCount);
+  Serial.println(" tests passed");
+  Serial.println("Type 'r' in Serial Monitor to run all tests again.");
+  Serial.println("==========================================");
+}
+
+void runAllTests() {
+  g_resultCount = 0;
+  printBanner();
+
+  String detail;
+
+  detail = "";
+  bool i2cOk = runI2CScan(detail);
+  addResult("I2C scan (0x68/0x69)", i2cOk, detail);
+
+  detail = "";
+  bool imuPresent = testIMUPresence(detail);
+  addResult("IMU WHO_AM_I + wake", imuPresent, detail);
+
+  detail = "";
+  bool imuStream = false;
+  if (imuPresent) {
+    imuStream = testIMUStreaming(detail);
+  } else {
+    detail = "skipped (IMU not present)";
+  }
+  addResult("IMU stream stability", imuStream, detail);
+
+  detail = "";
+  bool buttonAOk = testButtonPressRelease(BUTTON_A, "Button A", detail);
+  addResult("Button A", buttonAOk, detail);
+
+  detail = "";
+  bool buttonBOk = testButtonPressRelease(BUTTON_B, "Button B", detail);
+  addResult("Button B", buttonBOk, detail);
+
+  detail = "";
+  bool joyBtnOk = testButtonPressRelease(JOYSTICK_BUTTON, "Joystick Button", detail);
+  addResult("Joystick Button", joyBtnOk, detail);
+
+  detail = "";
+  bool joyXOk = testJoystickAxis(JOYSTICK_X, "Joystick X", detail);
+  addResult("Joystick X axis", joyXOk, detail);
+
+  detail = "";
+  bool joyYOk = testJoystickAxis(JOYSTICK_Y, "Joystick Y", detail);
+  addResult("Joystick Y axis", joyYOk, detail);
+
+  detail = "";
+  bool imuMotionOk = false;
+  if (imuPresent) {
+    imuMotionOk = testIMUMotion(detail);
+  } else {
+    detail = "skipped (IMU not present)";
+  }
+  addResult("IMU motion response", imuMotionOk, detail);
+
+  printSummary();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  pinMode(BUTTON_A, INPUT_PULLUP);
+  pinMode(BUTTON_B, INPUT_PULLUP);
+  pinMode(JOYSTICK_BUTTON, INPUT_PULLUP);
+  pinMode(JOYSTICK_X, INPUT);
+  pinMode(JOYSTICK_Y, INPUT);
+
+  analogReadResolution(12);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000); // Run diagnostics at 100kHz to reduce false negatives.
+
+  runAllTests();
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    int c = Serial.read();
+    if (c == 'r' || c == 'R') {
+      runAllTests();
+    }
+  }
+  delay(10);
+}

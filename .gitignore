@@ -1,2 +1,7 @@
 .pio
 .vscode
+.cursor
+Drivers
+*main
+test/testVenv
+test/__pycache__

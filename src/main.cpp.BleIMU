@@ -1,0 +1,270 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEHIDDevice.h>
+#include <BLE2902.h>
+#include <HIDTypes.h>
+#include <string.h>
+
+namespace {
+
+static const uint8_t kHidReportDescriptor[] PROGMEM = {
+  0x06, 0x03, 0x00, // Usage Page (Vendor 0x0003)
+  0x09, 0x00,       // Usage (0x00)
+  0xA1, 0x01,       // Collection (Application)
+  0x15, 0x00,       // Logical Min (0)
+  0x26, 0xFF, 0x00, // Logical Max (255)
+  0x85, 0x01,       // Report ID (1)
+  0x75, 0x08,       // Report Size (8)
+  0x95, 0x3F,       // Report Count (63)
+  0x09, 0x00,       // Usage (0x00)
+  0x81, 0x02,       // Input (Data,Var,Abs)
+  0xC0              // End Collection
+};
+
+static constexpr uint8_t kReportId = 0x01;
+static constexpr size_t kReportLen = 63;
+static constexpr uint16_t kBleAppearanceHidGeneric = 0x03C0;
+
+bool g_connected = false;
+bool g_subscribed = true;
+BLECharacteristic *g_inputReport = nullptr;
+BLE2902 *g_inputReportCccd = nullptr;
+
+class ControllerServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *pServer) override {
+    (void)pServer;
+    g_connected = true;
+    g_subscribed = true;
+    Serial.println("HID link connected. Waiting for notifications to be enabled...");
+  }
+
+  void onDisconnect(BLEServer *pServer) override {
+    g_connected = false;
+    g_subscribed = true;
+    Serial.println("HID link disconnected. Waiting for reconnect...");
+    pServer->startAdvertising();
+  }
+};
+
+bool notificationsEnabled() {
+  if (g_inputReportCccd == nullptr) {
+    return false;
+  }
+
+  uint8_t* cccdValue = g_inputReportCccd->getValue();
+  const size_t len = g_inputReportCccd->getLength();
+
+  if (cccdValue == nullptr || len < 2) {
+    return false;
+  }
+
+  const uint16_t bits =
+      static_cast<uint16_t>(cccdValue[0]) |
+      (static_cast<uint16_t>(cccdValue[1]) << 8);
+
+  return (bits & 0x0001U) != 0U;
+}
+void updateSubscriptionState() {
+  static bool lastSubscribed = false;
+  const bool subscribed = notificationsEnabled();
+
+  if (subscribed != lastSubscribed) {
+    lastSubscribed = subscribed;
+    g_subscribed = subscribed;
+
+    if (subscribed) {
+      Serial.println("Client enabled notifications on Report characteristic.");
+    } else {
+      Serial.println("Client disabled notifications on Report characteristic.");
+    }
+  }
+}
+
+void sendTestReport(float w, float x, float y, float z) {
+  if (!g_connected || !g_subscribed || g_inputReport == nullptr) {
+    return;
+  }
+
+  float orderedQuat[4];
+  orderedQuat[0] = w;
+  orderedQuat[1] = y;
+  orderedQuat[2] = z;
+  orderedQuat[3] = x;
+
+  uint32_t sendTimeUs = micros();
+
+  uint8_t report[kReportLen];
+  memset(report, 0, sizeof(report));
+
+  memcpy(report, orderedQuat, sizeof(orderedQuat));                 // bytes 0..15
+  memcpy(report + sizeof(orderedQuat), &sendTimeUs, sizeof(sendTimeUs)); // bytes 16..19
+
+  g_inputReport->setValue(report, sizeof(report));
+  g_inputReport->notify();
+
+  Serial.printf(
+    "Sent HID report | w=%.3f x=%.3f y=%.3f z=%.3f | send_us=%lu\n",
+    w, x, y, z, (unsigned long)sendTimeUs
+  );
+}
+
+// void sendTestReport(float w, float x, float y, float z) {
+//   if (!g_connected || !g_subscribed || g_inputReport == nullptr) {
+//     return;
+//   }
+
+//   float orderedQuat[4];
+//   orderedQuat[0] = w;
+//   orderedQuat[1] = y;
+//   orderedQuat[2] = z;
+//   orderedQuat[3] = x;
+
+//   uint8_t report[kReportLen];
+//   memset(report, 0, sizeof(report));
+//   memcpy(report, orderedQuat, sizeof(orderedQuat));
+
+//   g_inputReport->setValue(report, sizeof(report));
+//   g_inputReport->notify();
+
+//   Serial.printf(
+//     "Sent HID report | w=%.3f x=%.3f y=%.3f z=%.3f | first4bytes=%02X %02X %02X %02X\n",
+//     w,
+//     x,
+//     y,
+//     z,
+//     report[0],
+//     report[1],
+//     report[2],
+//     report[3]
+//   );
+// }
+
+} // namespace
+
+void setup() {
+  Serial.begin(115200);
+  BLEDevice::init("ESP32-Controller");
+
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(new ControllerServerCallbacks());
+
+  BLEHIDDevice *hid = new BLEHIDDevice(server);
+  g_inputReport = hid->inputReport(kReportId);
+
+  g_inputReportCccd = new BLE2902();
+  g_inputReportCccd->setNotifications(true);
+  g_inputReport->addDescriptor(g_inputReportCccd);
+
+  hid->manufacturer()->setValue("Shehraan");
+  hid->pnp(0x02, 0xE502, 0xA111, 0x0110);
+  hid->hidInfo(0x00, 0x01);
+  hid->reportMap((uint8_t *)kHidReportDescriptor, sizeof(kHidReportDescriptor));
+  hid->startServices();
+  hid->setBatteryLevel(100);
+
+  BLEAdvertising *advertising = server->getAdvertising();
+  advertising->setAppearance(kBleAppearanceHidGeneric);
+  advertising->addServiceUUID(hid->hidService()->getUUID());
+  advertising->start();
+
+  Serial.println("BLE HID test started. Device name: ESP32-Controller");
+ Serial.println("Use nRF Connect and enable notifications on Report (0x2A4D).");
+}
+
+// void loop() {
+//   static uint32_t lastSendMs = 0;
+//   static uint32_t lastStatusPrintMs = 0;
+//   static float phase = 0.0f;
+
+//   const uint32_t nowMs = millis();
+
+//   updateSubscriptionState();
+
+//   if (!g_connected || !g_subscribed) {
+//     if (nowMs - lastStatusPrintMs >= 2000U) {
+//       if (!g_connected) {
+//         Serial.println("Waiting for HID host connection...");
+//       } else {
+//         Serial.println("Connected, but notifications are still OFF. Enable notify on Report (0x2A4D).");
+//       }
+//       lastStatusPrintMs = nowMs;
+//     }
+//     delay(5);
+//     return;
+//   }
+
+//   if (nowMs - lastSendMs >= 500U) {
+//     phase += 0.25f;
+//     if (phase > 1.0f) {
+//       phase = -1.0f;
+//     }
+
+//     sendTestReport(1.0f, 0.25f, phase, 0.1f);
+//     lastSendMs = nowMs;
+//   }
+// }
+
+void loop() {
+  static uint32_t lastSendUs = 0;
+  static uint32_t lastStatusPrintMs = 0;
+  static uint32_t packetId = 0;
+
+  const uint32_t nowMs = millis();
+  const uint32_t nowUs = micros();
+
+  // Change this to 10000 for 10 ms, or 5000 for 5 ms
+  static constexpr uint32_t kSendIntervalUs = 10000;
+
+  updateSubscriptionState();
+
+  if (!g_connected || !g_subscribed) {
+    if (nowMs - lastStatusPrintMs >= 2000U) {
+      if (!g_connected) {
+        Serial.println("Waiting for HID host connection...");
+      } else {
+        Serial.println("Connected, but notifications are still OFF. Enable notify on Report (0x2A4D).");
+      }
+      lastStatusPrintMs = nowMs;
+    }
+    delay(1);
+    return;
+  }
+
+  if ((uint32_t)(nowUs - lastSendUs) >= kSendIntervalUs) {
+    lastSendUs = nowUs;
+
+    // Simple fixed test quaternion
+    float w = 1.0f;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+
+    uint32_t sendTimeUs = micros();
+
+    uint8_t report[kReportLen];
+    memset(report, 0, sizeof(report));
+
+    // bytes 0..15 = quaternion
+    memcpy(report + 0, &w, 4);
+    memcpy(report + 4, &y, 4);
+    memcpy(report + 8, &z, 4);
+    memcpy(report + 12, &x, 4);
+
+    // bytes 16..19 = send timestamp
+    memcpy(report + 16, &sendTimeUs, 4);
+
+    // bytes 20..23 = packet counter
+    memcpy(report + 20, &packetId, 4);
+
+    g_inputReport->setValue(report, sizeof(report));
+    g_inputReport->notify();
+
+    packetId++;
+
+    // Print every 100 packets so serial doesn't slow the test down
+    if ((packetId % 100) == 0) {
+      Serial.printf("Sent %lu packets\n", (unsigned long)packetId);
+    }
+  }
+}

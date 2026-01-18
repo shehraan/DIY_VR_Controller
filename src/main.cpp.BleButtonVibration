@@ -1,0 +1,255 @@
+﻿#include <Arduino.h>
+#include <BLE2902.h>
+#include <BLEDevice.h>
+#include <BLEHIDDevice.h>
+#include <BLEServer.h>
+#include <HIDTypes.h>
+#include <string.h>
+
+namespace {
+
+static constexpr const char *kDeviceName = "ESP32-Controller";
+
+static constexpr uint8_t kInputReportId = 0x01;
+static constexpr uint8_t kOutputReportId = 0x02;
+static constexpr size_t kInputReportLen = 63;
+static constexpr uint16_t kBleAppearanceHidGeneric = 0x03C0;
+
+static constexpr uint8_t kButtonPin = 12;
+static constexpr uint8_t kMotorPin = 14;
+static constexpr uint8_t kPwmChannel = 0;
+static constexpr uint16_t kPwmFreqHz = 200;
+static constexpr uint8_t kPwmResBits = 8;
+
+static const uint8_t kHidReportDescriptor[] PROGMEM = {
+  0x06, 0x03, 0x00,
+  0x09, 0x00,
+  0xA1, 0x01,
+  0x15, 0x00,
+  0x26, 0xFF, 0x00,
+  0x85, 0x01,
+  0x75, 0x08,
+  0x95, 0x3F,
+  0x09, 0x00,
+  0x81, 0x02,
+  0x85, 0x02,
+  0x75, 0x08,
+  0x95, 0x05,
+  0x09, 0x00,
+  0x91, 0x02,
+  0xC0
+};
+
+bool g_connected = false;
+bool g_subscribed = false;
+
+volatile bool g_hasPendingRumble = false;
+volatile uint8_t g_pendingAmplitude = 0;
+volatile uint16_t g_pendingDurationMs = 0;
+
+bool g_motorOn = false;
+uint32_t g_motorStopAtMs = 0;
+
+BLECharacteristic *g_inputReport = nullptr;
+BLECharacteristic *g_outputReport = nullptr;
+
+void motorWrite(uint8_t duty) {
+  ledcWrite(kPwmChannel, duty);
+}
+
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *server) override {
+    (void)server;
+    g_connected = true;
+    g_subscribed = false;
+    Serial.println("HID central connected.");
+  }
+
+  void onDisconnect(BLEServer *server) override {
+    g_connected = false;
+    g_subscribed = false;
+    g_motorOn = false;
+    motorWrite(0);
+    Serial.println("HID central disconnected. Restarting advertising.");
+    server->startAdvertising();
+  }
+};
+
+bool parseRumblePacket(const uint8_t *data, size_t len, uint8_t &amplitude, uint16_t &durationMs) {
+  if (data == nullptr || len < 2U) {
+    return false;
+  }
+  amplitude = data[0];
+  durationMs = static_cast<uint16_t>(data[1]) | (static_cast<uint16_t>(len >= 3U ? data[2] : 0U) << 8);
+  return true;
+}
+
+class OutputReportCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    if (characteristic == nullptr) {
+      return;
+    }
+
+    std::string value = characteristic->getValue();
+
+    // ── DEBUG: print every received byte ──────────────────────────────
+    Serial.printf("[RUMBLE-RAW] len=%u bytes:", static_cast<unsigned>(value.size()));
+    for (size_t i = 0; i < value.size(); i++) {
+      Serial.printf(" %02X", static_cast<uint8_t>(value[i]));
+    }
+    Serial.println();
+    // ──────────────────────────────────────────────────────────────────
+
+    uint8_t amp = 0;
+    uint16_t durationMs = 0;
+    if (!parseRumblePacket(reinterpret_cast<const uint8_t *>(value.data()), value.size(), amp, durationMs)) {
+      Serial.printf("[RUMBLE] unsupported packet length=%u\n", static_cast<unsigned>(value.size()));
+      return;
+    }
+
+    g_pendingAmplitude = amp;
+    g_pendingDurationMs = durationMs;
+    g_hasPendingRumble = true;
+  }
+};
+
+ServerCallbacks g_serverCallbacks;
+OutputReportCallbacks g_outputReportCallbacks;
+
+void applyPendingRumble() {
+  if (!g_hasPendingRumble) {
+    return;
+  }
+
+  const uint8_t amp = g_pendingAmplitude;
+  const uint16_t durationMs = g_pendingDurationMs;
+  g_hasPendingRumble = false;
+
+  if (amp == 0U || durationMs == 0U) {
+    g_motorOn = false;
+    motorWrite(0);
+    Serial.println("[RUMBLE] stop");
+    return;
+  }
+
+  g_motorOn = true;
+  g_motorStopAtMs = millis() + durationMs;
+  motorWrite(amp);
+  Serial.printf("[RUMBLE] amp=%u dur=%u ms\n", static_cast<unsigned>(amp), static_cast<unsigned>(durationMs));
+}
+
+void updateMotorState() {
+  if (g_motorOn && millis() >= g_motorStopAtMs) {
+    g_motorOn = false;
+    motorWrite(0);
+    Serial.println("[RUMBLE] done");
+  }
+}
+
+bool notificationsEnabled() {
+  if (g_inputReport == nullptr) {
+    return false;
+  }
+  BLE2902 *cccd = static_cast<BLE2902 *>(g_inputReport->getDescriptorByUUID(BLEUUID((uint16_t)0x2902)));
+  if (cccd == nullptr) {
+    return false;
+  }
+  uint8_t *v = cccd->getValue();
+  if (v == nullptr || cccd->getLength() < 2) {
+    return false;
+  }
+  return (((uint16_t)v[0] | ((uint16_t)v[1] << 8)) & 0x0001U) != 0U;
+}
+
+void sendTestInputReport() {
+  static uint32_t packetId = 0;
+  static uint32_t lastSendUs = 0;
+
+  const uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - lastSendUs) < 10000U) {
+    return;
+  }
+  lastSendUs = nowUs;
+
+  uint8_t report[kInputReportLen];
+  memset(report, 0, sizeof(report));
+
+  float w = 1.0f;
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  uint32_t sendTimeUs = micros();
+  uint8_t button = (digitalRead(kButtonPin) == LOW) ? 1U : 0U;
+
+  memcpy(report + 0, &w, 4);
+  memcpy(report + 4, &y, 4);
+  memcpy(report + 8, &z, 4);
+  memcpy(report + 12, &x, 4);
+  memcpy(report + 16, &button, 1);
+  memcpy(report + 20, &sendTimeUs, 4);
+  memcpy(report + 24, &packetId, 4);
+
+  g_inputReport->setValue(report, sizeof(report));
+  g_inputReport->notify();
+
+  packetId++;
+  if ((packetId % 100U) == 0U) {
+    Serial.printf("[HID] sent %lu input reports\n", static_cast<unsigned long>(packetId));
+  }
+}
+
+} // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(kButtonPin, INPUT_PULLUP);
+  ledcSetup(kPwmChannel, kPwmFreqHz, kPwmResBits);
+  ledcAttachPin(kMotorPin, kPwmChannel);
+  motorWrite(0);
+
+  BLEDevice::init(kDeviceName);
+
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(&g_serverCallbacks);
+
+  BLEHIDDevice *hid = new BLEHIDDevice(server);
+  g_inputReport = hid->inputReport(kInputReportId);
+  g_outputReport = hid->outputReport(kOutputReportId);
+  if (g_outputReport != nullptr) {
+    g_outputReport->setCallbacks(&g_outputReportCallbacks);
+  }
+
+  hid->manufacturer()->setValue("Shehraan");
+  hid->pnp(0x02, 0xE502, 0xA111, 0x0110);
+  hid->hidInfo(0x00, 0x01);
+  hid->reportMap((uint8_t *)kHidReportDescriptor, sizeof(kHidReportDescriptor));
+  hid->startServices();
+  hid->setBatteryLevel(100);
+
+  BLEAdvertising *adv = server->getAdvertising();
+  adv->setAppearance(kBleAppearanceHidGeneric);
+  adv->addServiceUUID(hid->hidService()->getUUID());
+  adv->start();
+
+  Serial.println("=== BLE HID test firmware ready ===");
+  Serial.printf("Device: %s\n", kDeviceName);
+  Serial.println("Input report id=1, len=63 (notify)");
+  Serial.println("Output report id=2 (write rumble)");
+}
+
+void loop() {
+  applyPendingRumble();
+  updateMotorState();
+
+  if (!g_connected) {
+    delay(1);
+    return;
+  }
+
+  // Stream input reports whenever a host is connected.
+  sendTestInputReport();
+
+  delay(1);
+}

@@ -1,0 +1,217 @@
+#include <Arduino.h>
+#include "driver/ledc.h"
+
+namespace HapticsTest {
+
+static constexpr uint8_t MOTOR_PIN      = 14;   // ESP32 output-capable PWM pin
+static constexpr uint8_t PWM_CHANNEL    = 0;
+static constexpr uint16_t PWM_FREQ_HZ   = 200;
+static constexpr uint8_t PWM_RES_BITS   = 8;
+enum class HapticClass : uint8_t {
+  CLICK = 0,
+  DOUBLE_CLICK,
+  TAP,
+  PULSE,
+  HEAVY_PULSE,
+  SHORT_BUZZ,
+  LONG_BUZZ,
+  WARNING_BUZZ
+};
+
+static void motorWrite(uint8_t duty) {
+  ledcWrite(PWM_CHANNEL, duty);
+}
+
+static void motorStop() {
+  motorWrite(0);
+}
+
+static void debugHeader(const char* name) {
+  Serial.println();
+  Serial.println("======================================");
+  Serial.print("Playing: ");
+  Serial.println(name);
+  Serial.println("======================================");
+}
+
+static void restBetweenEffects() {
+  Serial.println("Motor OFF for 1000 ms");
+  motorStop();
+  delay(1000);
+}
+
+static void playClick() {
+  debugHeader("CLICK");
+  Serial.println("Duty 255 for *30 ms");
+  motorWrite(255);
+  delay(30);
+  motorStop();
+}
+
+static void playDoubleClick() {
+  debugHeader("DOUBLE_CLICK");
+
+  Serial.println("Pulse 1: Duty 255 for *25 ms");
+  motorWrite(255);
+  delay(25);
+
+  Serial.println("Gap: OFF for 55 ms");
+  motorStop();
+  delay(80);
+
+  Serial.println("Pulse 2: Duty 255 for *25 ms");
+  motorWrite(255);
+  delay(25);
+
+  motorStop();
+}
+
+static void playTap() {
+  debugHeader("TAP");
+  Serial.println("Duty *128 for 50 ms");
+  motorWrite(128);
+  delay(50);
+  motorStop();
+}
+
+static void playPulse() {
+  debugHeader("PULSE");
+  Serial.println("Duty 220 for 90 ms");
+  motorWrite(220);
+  delay(90);
+  motorStop();
+}
+
+static void playHeavyPulse() {
+  debugHeader("HEAVY_PULSE");
+  Serial.println("Duty 255 for 120 ms");
+  motorWrite(255);
+  delay(120);
+  motorStop();
+}
+
+static void playShortBuzz() {
+  debugHeader("SHORT_BUZZ");
+  Serial.println("Duty 220 for 170 ms");
+  motorWrite(220);
+  delay(170);
+  motorStop();
+}
+
+static void playLongBuzz() {
+  debugHeader("LONG_BUZZ");
+  Serial.println("Duty 220 for 320 ms");
+  motorWrite(220);
+  delay(320);
+  motorStop();
+}
+
+static void playWarningBuzz() {
+  debugHeader("WARNING_BUZZ");
+
+  for (int i = 1; i <= 3; i++) {
+    Serial.print("Burst ");
+    Serial.print(i);
+    Serial.println(": Duty 255 for 120 ms");
+    motorWrite(255);
+    delay(120);
+
+    if (i < 3) {
+      Serial.println("Gap: OFF for 70 ms");
+      motorStop();
+      delay(70);
+    }
+  }
+
+  motorStop();
+}
+
+static void playEffect(HapticClass effect) {
+  switch (effect) {
+    case HapticClass::CLICK:
+      playClick();
+      break;
+    case HapticClass::DOUBLE_CLICK:
+      playDoubleClick();
+      break;
+    case HapticClass::TAP:
+      playTap();
+      break;
+    case HapticClass::PULSE:
+      playPulse();
+      break;
+    case HapticClass::HEAVY_PULSE:
+      playHeavyPulse();
+      break;
+    case HapticClass::SHORT_BUZZ:
+      playShortBuzz();
+      break;
+    case HapticClass::LONG_BUZZ:
+      playLongBuzz();
+      break;
+    case HapticClass::WARNING_BUZZ:
+      playWarningBuzz();
+      break;
+  }
+
+  motorStop();
+}
+
+void begin() {
+  Serial.begin(115200);
+  delay(500);
+
+  ledcSetup(PWM_CHANNEL, PWM_FREQ_HZ, PWM_RES_BITS);
+  ledcAttachPin(MOTOR_PIN, PWM_CHANNEL);
+  motorStop();
+
+  Serial.println();
+  Serial.println("Haptics test started");
+  Serial.print("Motor pin: ");
+  Serial.println(MOTOR_PIN);
+  Serial.print("PWM freq: ");
+  Serial.println(PWM_FREQ_HZ);
+  Serial.print("PWM resolution bits: ");
+  Serial.println(PWM_RES_BITS);
+  Serial.println("Looping through all rumble classes...");
+}
+
+void runLoop() {
+  playEffect(HapticClass::CLICK);
+  restBetweenEffects();
+
+  playEffect(HapticClass::DOUBLE_CLICK);
+  restBetweenEffects();
+
+  playEffect(HapticClass::TAP);
+  restBetweenEffects();
+
+  playEffect(HapticClass::PULSE);
+  restBetweenEffects();
+
+  playEffect(HapticClass::HEAVY_PULSE);
+  restBetweenEffects();
+
+  playEffect(HapticClass::SHORT_BUZZ);
+  restBetweenEffects();
+
+  playEffect(HapticClass::LONG_BUZZ);
+  restBetweenEffects();
+
+  playEffect(HapticClass::WARNING_BUZZ);
+  restBetweenEffects();
+
+  Serial.println();
+  Serial.println("Finished full haptics cycle. Restarting in 2000 ms...");
+  delay(2000);
+}
+
+} // namespace HapticsTest
+
+void setup() {
+  HapticsTest::begin();
+}
+
+void loop() {
+  HapticsTest::runLoop();
+}

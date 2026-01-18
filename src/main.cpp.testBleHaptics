@@ -1,0 +1,299 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEHIDDevice.h>
+#include <BLE2902.h>
+#include <HIDTypes.h>
+#include <string.h>
+
+namespace {
+
+static const uint8_t kHidReportDescriptor[] PROGMEM = {
+  0x06, 0x03, 0x00,
+  0x09, 0x00,
+  0xA1, 0x01,
+  0x15, 0x00,
+  0x26, 0xFF, 0x00,
+  0x85, 0x01,
+  0x75, 0x08,
+  0x95, 0x3F,
+  0x09, 0x00,
+  0x81, 0x02,
+  0xC0
+};
+
+static constexpr uint8_t  kReportId  = 0x01;
+static constexpr size_t   kReportLen = 63;
+static constexpr uint16_t kBleAppearanceHidGeneric = 0x03C0;
+
+// ── Motor / PWM ──────────────────────────────────────────────────────────────
+static constexpr uint8_t  kMotorPin   = 14;
+static constexpr uint8_t  kPwmChannel = 0;
+static constexpr uint16_t kPwmFreqHz  = 200;
+static constexpr uint8_t  kPwmResBits = 8;
+static constexpr uint8_t  kDutyLow    = 170;
+static constexpr uint8_t  kDutyMed    = 220;
+static constexpr uint8_t  kDutyHi     = 255;
+
+// ── BLE globals ──────────────────────────────────────────────────────────────
+bool g_connected  = false;
+bool g_subscribed = true;
+BLECharacteristic *g_inputReport     = nullptr;
+BLE2902           *g_inputReportCccd = nullptr;
+
+// ── Haptic types ─────────────────────────────────────────────────────────────
+enum class HapticClass : uint8_t {
+  NONE = 0, CLICK, TAP, PULSE, HEAVY_PULSE,
+  SHORT_BUZZ, LONG_BUZZ, DOUBLE_CLICK, WARNING_BUZZ
+};
+
+enum class Strength : uint8_t { LEVEL_LOW = 0, LEVEL_MEDIUM, LEVEL_HIGH };
+
+struct HapticCommand {
+  HapticClass effect           = HapticClass::NONE;
+  Strength    strength         = Strength::LEVEL_MEDIUM;
+  uint16_t    sourceDurationMs = 0;
+  uint8_t     sourceAmplitude  = 0;
+};
+
+struct HapticStep { uint8_t duty; uint16_t durationMs; };
+
+static constexpr size_t kMaxHapticSteps = 8;
+HapticStep g_hapticSteps[kMaxHapticSteps];
+size_t   g_hapticStepCount   = 0;
+size_t   g_hapticStepIndex   = 0;
+bool     g_hapticActive      = false;
+uint32_t g_hapticStepStartMs = 0;
+
+// ── Haptic helpers ────────────────────────────────────────────────────────────
+uint8_t dutyForStrength(Strength s) {
+  switch (s) {
+    case Strength::LEVEL_LOW:  return kDutyLow;
+    case Strength::LEVEL_HIGH: return kDutyHi;
+    default:                   return kDutyMed;
+  }
+}
+
+Strength classifyStrength(uint8_t amp) {
+  if (amp < 85)  return Strength::LEVEL_LOW;
+  if (amp < 170) return Strength::LEVEL_MEDIUM;
+  return Strength::LEVEL_HIGH;
+}
+
+HapticCommand mapRumbleToClass(uint8_t amplitude, uint16_t durationMs) {
+  HapticCommand cmd;
+  cmd.sourceAmplitude  = amplitude;
+  cmd.sourceDurationMs = durationMs;
+  cmd.strength         = classifyStrength(amplitude);
+
+  if (!durationMs || !amplitude) { cmd.effect = HapticClass::NONE; return cmd; }
+
+  if      (durationMs <= 30)  cmd.effect = HapticClass::CLICK;
+  else if (durationMs <= 65)  cmd.effect = HapticClass::TAP;
+  else if (durationMs <= 120) cmd.effect = amplitude >= 180 ? HapticClass::HEAVY_PULSE : HapticClass::PULSE;
+  else if (durationMs <= 220) cmd.effect = HapticClass::SHORT_BUZZ;
+  else                        cmd.effect = HapticClass::LONG_BUZZ;
+
+  if (durationMs <= 45  && amplitude >= 220) cmd.effect = HapticClass::DOUBLE_CLICK;
+  if (durationMs >= 350 && amplitude >= 200) cmd.effect = HapticClass::WARNING_BUZZ;
+  return cmd;
+}
+
+void motorWrite(uint8_t duty) { ledcWrite(kPwmChannel, duty); }
+
+void stopHaptics() {
+  motorWrite(0);
+  g_hapticActive = false;
+  g_hapticStepCount = g_hapticStepIndex = 0;
+}
+
+void loadHapticPattern(const HapticCommand &cmd) {
+  g_hapticStepCount = g_hapticStepIndex = 0;
+  const uint8_t d = dutyForStrength(cmd.strength);
+
+  // Helper: avoids brace-init which older ESP32 toolchain rejects in lambdas
+  auto push = [](uint8_t duty, uint16_t ms) {
+    if (g_hapticStepCount < kMaxHapticSteps) {
+      g_hapticSteps[g_hapticStepCount].duty       = duty;
+      g_hapticSteps[g_hapticStepCount].durationMs = ms;
+      g_hapticStepCount++;
+    }
+  };
+
+  switch (cmd.effect) {
+    case HapticClass::NONE:         push(0, 1); break;
+    case HapticClass::CLICK:        push(d, 25);       push(0, 40); break;
+    case HapticClass::TAP:          push(d, 50);       push(0, 50); break;
+    case HapticClass::PULSE:        push(kDutyMed, 90); push(0, 60); break;
+    case HapticClass::HEAVY_PULSE:  push(kDutyHi, 120); push(0, 70); break;
+    case HapticClass::SHORT_BUZZ:   push(d, 170);      push(0, 80); break;
+    case HapticClass::LONG_BUZZ:    push(d, 320);      push(0, 100); break;
+    case HapticClass::DOUBLE_CLICK:
+      push(kDutyHi, 25); push(0, 70); push(kDutyHi, 25); push(0, 80); break;
+    case HapticClass::WARNING_BUZZ:
+      push(kDutyHi, 120); push(0, 70);
+      push(kDutyHi, 120); push(0, 70);
+      push(kDutyHi, 120); push(0, 100); break;
+  }
+}
+
+void playHapticCommand(const HapticCommand &cmd) {
+  loadHapticPattern(cmd);
+  if (!g_hapticStepCount) { stopHaptics(); return; }
+  g_hapticActive      = true;
+  g_hapticStepIndex   = 0;
+  g_hapticStepStartMs = millis();
+  motorWrite(g_hapticSteps[0].duty);
+  Serial.printf("[HAPTICS] amp=%u dur=%u class=%u steps=%u\n",
+    (unsigned)cmd.sourceAmplitude, (unsigned)cmd.sourceDurationMs,
+    (unsigned)cmd.effect, (unsigned)g_hapticStepCount);
+}
+
+void updateHaptics() {
+  if (!g_hapticActive || !g_hapticStepCount) return;
+  const uint32_t now = millis();
+  if ((now - g_hapticStepStartMs) >= g_hapticSteps[g_hapticStepIndex].durationMs) {
+    if (++g_hapticStepIndex >= g_hapticStepCount) { stopHaptics(); return; }
+    g_hapticStepStartMs = now;
+    motorWrite(g_hapticSteps[g_hapticStepIndex].duty);
+  }
+}
+
+// ── Rumble packet parser (call from wherever you receive rumble commands) ──────
+void handleRumblePacket(const uint8_t *data, size_t len) {
+  if (!data || !len) return;
+  uint8_t  amplitude = 0;
+  uint16_t durationMs = 0;
+  uint8_t  flags = 0;
+
+  if (len == 3) {
+    amplitude  = data[0];
+    durationMs = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+  } else if (len >= 5 && data[0] == 0x01) {
+    amplitude  = data[1];
+    durationMs = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
+    flags      = data[4];
+  } else {
+    Serial.printf("[HAPTICS] Unknown rumble format len=%u\n", (unsigned)len);
+    return;
+  }
+
+  if (flags & 0x01U) stopHaptics();
+  playHapticCommand(mapRumbleToClass(amplitude, durationMs));
+}
+
+// ── BLE server callbacks ──────────────────────────────────────────────────────
+class ControllerServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *pServer) override {
+    (void)pServer;
+    g_connected = g_subscribed = true;
+    Serial.println("HID link connected.");
+  }
+  void onDisconnect(BLEServer *pServer) override {
+    g_connected = false;
+    g_subscribed = true;
+    Serial.println("Disconnected — restarting advertising.");
+    pServer->startAdvertising();
+  }
+};
+
+bool notificationsEnabled() {
+  if (!g_inputReportCccd) return false;
+  uint8_t *v = g_inputReportCccd->getValue();
+  if (!v || g_inputReportCccd->getLength() < 2) return false;
+  return ((uint16_t)v[0] | ((uint16_t)v[1] << 8)) & 0x0001U;
+}
+
+void updateSubscriptionState() {
+  static bool last = false;
+  const bool  now  = notificationsEnabled();
+  if (now != last) {
+    last = g_subscribed = now;
+    Serial.printf("Notifications %s\n", now ? "ENABLED" : "disabled");
+  }
+}
+
+} // namespace
+
+// ── setup ─────────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("==== Controller BLE HID + Haptics =====");
+
+  ledcSetup(kPwmChannel, kPwmFreqHz, kPwmResBits);
+  ledcAttachPin(kMotorPin, kPwmChannel);
+  motorWrite(0);
+
+  BLEDevice::init(kDeviceName);
+  BLEServer    *server = BLEDevice::createServer();
+  server->setCallbacks(new ControllerServerCallbacks());
+
+  BLEHIDDevice *hid = new BLEHIDDevice(server);
+  g_inputReport     = hid->inputReport(kReportId);
+  g_inputReportCccd = new BLE2902();
+  g_inputReportCccd->setNotifications(true);
+  g_inputReport->addDescriptor(g_inputReportCccd);
+
+  hid->manufacturer()->setValue("Shehraan");
+  hid->pnp(0x02, 0xE502, 0xA111, 0x0110);
+  hid->hidInfo(0x00, 0x01);
+  hid->reportMap((uint8_t *)kHidReportDescriptor, sizeof(kHidReportDescriptor));
+  hid->startServices();
+  hid->setBatteryLevel(100);
+
+  BLEAdvertising *adv = server->getAdvertising();
+  adv->setAppearance(kBleAppearanceHidGeneric);
+  adv->addServiceUUID(hid->hidService()->getUUID());
+  adv->start();
+
+  Serial.printf("Advertising as \"%s\"\n", kDeviceName);
+}
+
+// ── loop ──────────────────────────────────────────────────────────────────────
+void loop() {
+  static uint32_t lastSendUs        = 0;
+  static uint32_t lastStatusPrintMs = 0;
+  static uint32_t packetId          = 0;
+
+  const uint32_t nowMs = millis();
+  const uint32_t nowUs = micros();
+  static constexpr uint32_t kSendIntervalUs = 10000;
+
+  updateSubscriptionState();
+  updateHaptics();
+
+  if (!g_connected || !g_subscribed) {
+    if (nowMs - lastStatusPrintMs >= 2000U) {
+      Serial.println(g_connected
+        ? "Connected — waiting for notifications..."
+        : "Waiting for connection...");
+      lastStatusPrintMs = nowMs;
+    }
+    delay(1);
+    return;
+  }
+
+  if ((uint32_t)(nowUs - lastSendUs) >= kSendIntervalUs) {
+    lastSendUs = nowUs;
+
+    float    w = 1.0f, x = 0.0f, y = 0.0f, z = 0.0f;
+    uint32_t sendTimeUs = micros();
+
+    uint8_t report[kReportLen];
+    memset(report, 0, sizeof(report));
+    memcpy(report +  0, &w,          4);
+    memcpy(report +  4, &y,          4);
+    memcpy(report +  8, &z,          4);
+    memcpy(report + 12, &x,          4);
+    memcpy(report + 16, &sendTimeUs, 4);
+    memcpy(report + 20, &packetId,   4);
+
+    g_inputReport->setValue(report, sizeof(report));
+    g_inputReport->notify();
+    packetId++;
+
+    if (packetId % 100 == 0)
+      Serial.printf("Sent %lu packets\n", (unsigned long)packetId);
+  }
+}

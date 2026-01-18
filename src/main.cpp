@@ -52,7 +52,7 @@
 // Define Joystick and Button pins
 #define BUTTON_A 12
 #define BUTTON_B 13
-#define JOYSTICK_BUTTON 23
+#define JOYSTICK_BUTTON 25
 #define JOYSTICK_X 32
 #define JOYSTICK_Y 33
 
