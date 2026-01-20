@@ -1,0 +1,14 @@
+{
+  "driver_vr_controller": {
+    "enable": true,
+    "device_serial": "vr_controller_001",
+    "device_model": "VR Controller",
+    "device_role": "right",
+    "hid_vendor_id": 58626,
+    "hid_product_id": 41233,
+    "hid_product_name": "ESP32-Controller",
+    "log_stats_interval_ms": 5000,
+    "fresh_threshold_ms": 50,
+    "timeout_threshold_ms": 100
+  }
+}
