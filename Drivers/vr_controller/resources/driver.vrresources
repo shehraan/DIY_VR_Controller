@@ -1,0 +1,10 @@
+{
+  "jsonid": "vrresources",
+  "statusicons": {
+    "Ready": "{vr_controller}/icons/controller_status_ready.png",
+    "ReadyAlert": "{vr_controller}/icons/controller_status_alert.png",
+    "NotReady": "{vr_controller}/icons/controller_status_off.png",
+    "Standby": "{vr_controller}/icons/controller_status_standby.png",
+    "Searching": "{vr_controller}/icons/controller_status_searching.png"
+  }
+}
