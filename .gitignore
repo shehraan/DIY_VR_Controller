@@ -1,2 +1,17 @@
 .pio
 .vscode
+.cursor
+*main
+test/testVenv
+test/__pycache__
+.vs/
+
+# SteamVR driver — CMake / build outputs (Drivers/vr_controller)
+Drivers/vr_controller/build/
+Drivers/vr_controller/build_thirdparty/
+Drivers/vr_controller/bin/win64/*.dll
+Drivers/vr_controller/bin/win64/*.exp
+Drivers/vr_controller/bin/win64/*.lib
+Drivers/vr_controller/bin/win64/Release/
+Drivers/vr_controller/bin/win64/Debug/
+Drivers/vr_controller/third_party/hidapi/hidapi.lib
