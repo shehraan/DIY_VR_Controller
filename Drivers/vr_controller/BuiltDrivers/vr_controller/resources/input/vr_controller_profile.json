@@ -1,0 +1,25 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "vr_controller",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/a": {
+      "type": "button",
+      "binding_image_point": [0.30, 0.28]
+    },
+    "/input/b": {
+      "type": "button",
+      "binding_image_point": [0.42, 0.22]
+    },
+    "/input/joystick": {
+      "type": "joystick",
+      "binding_image_point": [0.52, 0.48]
+    }
+  },
+  "output_source": {
+    "/output/haptic": {
+      "type": "vibration",
+      "binding_image_point": [0.52, 0.66]
+    }
+  }
+}

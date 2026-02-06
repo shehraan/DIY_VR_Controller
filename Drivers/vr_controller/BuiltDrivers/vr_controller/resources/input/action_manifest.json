@@ -1,0 +1,41 @@
+{
+  "version": 0,
+  "default_bindings": [
+    {
+      "controller_type": "vive_controller",
+      "binding_url": "bindings_vive_controller.json"
+    },
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/main/in/a_click",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/b_click",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/joystick_click",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/joystick",
+      "type": "vector2"
+    },
+    {
+      "name": "/actions/main/out/haptic",
+      "type": "vibration"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/main",
+      "usage": "single"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "action_manifest_version": 0,
+  "category": "steamvr_input",
+  "controller_type": "knuckles",
+  "description": "Default bindings for vr_controller (Index controller emulation path).",
+  "name": "vr_controller defaults (knuckles)",
+  "options": {},
+  "simulated_actions": [],
+  "bindings": {
+    "/actions/main": {
+      "sources": [
+        {
+          "path": "/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/a_click"
+            }
+          }
+        },
+        {
+          "path": "/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/b_click"
+            }
+          }
+        },
+        {
+          "path": "/input/thumbstick",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/main/in/joystick"
+            },
+            "click": {
+              "output": "/actions/main/in/joystick_click"
+            }
+          }
+        },
+        {
+          "path": "/output/haptic",
+          "mode": "vibration",
+          "inputs": {
+            "haptic": {
+              "output": "/actions/main/out/haptic"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

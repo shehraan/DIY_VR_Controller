@@ -1,0 +1,54 @@
+{
+  "action_manifest_version": 0,
+  "category": "steamvr_input",
+  "controller_type": "vive_controller",
+  "description": "Default bindings for vr_controller (Vive wand emulation path).",
+  "name": "vr_controller defaults (vive)",
+  "options": {},
+  "simulated_actions": [],
+  "bindings": {
+    "/actions/main": {
+      "sources": [
+        {
+          "path": "/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/a_click"
+            }
+          }
+        },
+        {
+          "path": "/input/application_menu",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/b_click"
+            }
+          }
+        },
+        {
+          "path": "/input/trackpad",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/main/in/joystick"
+            },
+            "click": {
+              "output": "/actions/main/in/joystick_click"
+            }
+          }
+        },
+        {
+          "path": "/output/haptic",
+          "mode": "vibration",
+          "inputs": {
+            "haptic": {
+              "output": "/actions/main/out/haptic"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
