@@ -28,6 +28,8 @@ This project covers real-time sensor fusion, wireless/USB transport, input handl
 
 ### Mechanical layout
 
+<p align="center"> <img src="Hardware\Docs\Controller_Schematic.png"> </p>
+
 The controller is built around a custom handheld enclosure that houses:
 - ESP32
 - MPU-6050
@@ -52,6 +54,8 @@ At a high level, the controller works like this:
 
 What made this interesting was getting sensing, input, communication, and physical packaging to work together as a single coherent device.
 
+The full build guide is in `BUILD.md`.
+
 ## Key engineering areas
 
 ### 1. Embedded sensing and IMU integration
@@ -69,7 +73,7 @@ GPIO21   ->  SDA
 GPIO22   ->  SCL
 ```
 
-From an engineering standpoint, this part of the project involved:
+This part of the project involved:
 
 - IMU bring-up and I2C debugging
 - reading raw accelerometer/gyroscope data reliably
