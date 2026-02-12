@@ -1,4 +1,6 @@
-# DIY VR Controller
+<h1 align="center"> DIY VR Controller </h1>
+
+<p align="center"> <img src="images\partsPrint.jpg" alt="printTopView" width="1000"> </p>
 
 A custom VR controller built using an ESP32, MPU-6050, joystick input, and onboard haptics to explore the full XR input stack from embedded sensing to SteamVR integration.
 
@@ -57,6 +59,8 @@ What made this interesting was getting sensing, input, communication, and physic
 The full build guide is in `BUILD.md`.
 
 ## Key engineering areas
+
+<p align="center"> <img src="images\VrControllerSideviewWires.jpg" alt="printTopView" width="700"> </p>
 
 ### 1. Embedded sensing and IMU integration
 
@@ -122,6 +126,7 @@ That meant working through questions like:
 ---
 
 ## Technical challenges
+<p align="center"> <img src="images\heldController.jpg" alt="printTopView" width="300"> </p>
 
 A project like this sounds simple from far away, but the real work shows up in the edge cases.
 Some of the recurring engineering problems were:
